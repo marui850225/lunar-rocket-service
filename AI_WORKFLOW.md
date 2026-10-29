@@ -27,3 +27,9 @@ How AI (Claude Code) was used on this challenge: what was delegated, what was ve
 - AI drafted `Decode` (validation) and `Apply` (pure state rules) plus table tests, following the design doc.
 - Verified: unit tests under `-race` (95.6% coverage); all 100,000 captured real messages decode and fold in order to 20 rockets / 6 exploded / 0 skipped (throwaway test, not committed).
 - AI-proposed decisions not covered in the design session, accepted by human: negative `by` is invalid (400); empty `reason` on `RocketExploded` is allowed, missing is not.
+
+### 4. `internal/store` (ordering, dedup, concurrency)
+
+- AI drafted the store (watermark + pending map, pending cap, map RWMutex + per-rocket mutex) and its tests.
+- Tests: worked example from the design doc, duplicate-of-pending, hidden-until-launched, buffer-full/backpressure, 1,000-seed shuffle+duplicate property test against a naive in-order oracle, 16-writer + 2-reader concurrency test under `-race`.
+- Verified the tests can fail (mutation testing, by hand): removing applied-dedup, draining pending out of order, and removing the per-rocket lock each make the suite fail (the last via the race detector and a fatal concurrent map write).
