@@ -21,3 +21,9 @@ How AI (Claude Code) was used on this challenge: what was delegated, what was ve
 ### 2. Repo setup
 
 - AI scaffolded layout, Makefile, README stub, placeholder `main.go`.
+
+### 3. `internal/rocket` (core domain)
+
+- AI drafted `Decode` (validation) and `Apply` (pure state rules) plus table tests, following the design doc.
+- Verified: unit tests under `-race` (95.6% coverage); all 100,000 captured real messages decode and fold in order to 20 rockets / 6 exploded / 0 skipped (throwaway test, not committed).
+- AI-proposed decisions not covered in the design session, accepted by human: negative `by` is invalid (400); empty `reason` on `RocketExploded` is allowed, missing is not.
