@@ -57,3 +57,16 @@ How AI (Claude Code) was used on this challenge: what was delegated, what was ve
 
 - AI drafted the README from the design doc and the implementation; commands and example outputs re-run before committing (quick start against the real binary, sort error message, test timing).
 - AI lowered `go.mod` from `go 1.27.3` (the local toolchain) to `go 1.25`, the oldest version that has every feature used (`sync.WaitGroup.Go`), so graders aren't forced onto the newest release.
+
+### 9. Redesign: SQLite + service layer (human-led)
+
+Human decisions after reviewing the in-memory design:
+- Replace the in-memory map with a relational SQLite store: a `rockets` table (one column per field) and a `pending` buffer table. AI pointed out two gaps in the first sketch, both accepted: the buffer must store the message body (not only its number), and draining must loop over the contiguous run. Human decided the loop stays in Go, not SQL.
+- Human renamed the watermark: `applied` described our action; the column is `last_message_number`, after the publisher's `messageNumber` (and matching the API's `lastMessageNumber`). The rocket model column stays `type`, the publisher's name.
+- Human asked for layers: `model` (types only; human chose to move `Decode`/`Apply` out of it), `service` (all business logic: ingest/buffer, get, list sort/order/defaults), `storage` (interface), `storage/sqlite` (implementation). List sorting moves into SQL `ORDER BY`, chosen via a fixed field→column map.
+
+Step 1 — `model`, `storage` interface, `storage/sqlite`:
+- AI: `modernc.org/sqlite` (pure Go, no cgo); pinned to v1.59.0 because the latest release raised the minimum Go to 1.26.
+- AI: one writer connection with `BEGIN IMMEDIATE` (serializes writes in Go instead of `SQLITE_BUSY`), separate read-only pool, WAL, `synchronous=FULL` so a 200 means on disk.
+- AI decision to flag: times are stored in UTC with fixed-width nanoseconds so text order equals time order (mixed offsets and trimmed nanos would sort wrong as text); the API will therefore return UTC timestamps (same instants).
+- Tests: round trip incl. NULLs and time zones, pending dedup/order/delete, rollback on error, every sort field and direction with tiebreak and a mixed-timezone case, SQL-injection-shaped sort rejected, reopen persistence, and a test that the pragmas really applied (driver ignores unknown DSN params silently).
