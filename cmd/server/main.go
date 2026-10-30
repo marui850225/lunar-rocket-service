@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -48,11 +49,15 @@ func run(addr string, maxPending int, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Bind before logging, so "listening" is only printed once it is true.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	logger.Info("listening", "addr", ln.Addr().String(), "maxPending", maxPending)
+
 	errc := make(chan error, 1)
-	go func() {
-		logger.Info("listening", "addr", addr, "maxPending", maxPending)
-		errc <- srv.ListenAndServe()
-	}()
+	go func() { errc <- srv.Serve(ln) }()
 
 	select {
 	case err := <-errc:

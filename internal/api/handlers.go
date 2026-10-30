@@ -26,6 +26,7 @@ type Store interface {
 	Ingest(rocket.Message) (store.Result, error)
 	Get(channel string) (rocket.Rocket, bool)
 	List() []rocket.Rocket
+	Debug() []store.ChannelInfo
 }
 
 type handler struct {
@@ -40,6 +41,11 @@ func New(s Store, log *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /messages", h.postMessage)
 	mux.HandleFunc("GET /rockets", h.listRockets)
 	mux.HandleFunc("GET /rockets/{channel}", h.getRocket)
+	// Read-only view of internal bookkeeping (watermark, pending buffer) for
+	// debugging and demos. Would sit behind auth or an admin port in production.
+	mux.HandleFunc("GET /debug/store", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, s.Debug())
+	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, "ok\n")
 	})

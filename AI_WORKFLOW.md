@@ -39,3 +39,8 @@ How AI (Claude Code) was used on this challenge: what was delegated, what was ve
 - AI drafted handlers (status codes per design: 200 applied/buffered/duplicate, 400 invalid, 503 + Retry-After when the buffer is full, 500 without leaking internals), sorting with id tiebreak, JSON shape, and `main.go` with timeouts and graceful shutdown on SIGINT/SIGTERM.
 - Tests: `httptest` for every status code, a fake store for the 500 path, exact JSON shape, 404 for unknown/unlaunched, every sort field and order, 400 for bad sort/order, 405 on wrong method.
 - Verified against the real binary (defaults, 100,000 messages, 45 s): no errors on either side; final state of all 20 rockets matches an independent Python fold of an earlier capture (same seed) field by field.
+
+### 6. Debug endpoint (human request)
+
+- Human asked how to inspect the in-memory store; AI proposed and added read-only `GET /debug/store` (per-channel watermark, pending count, lowest 100 pending numbers, including unlaunched channels).
+- While demoing it, AI found a real bug in its own `main.go`: "listening" was logged before the bind, so a port conflict looked like a successful start. Fixed by binding with `net.Listen` first, then logging.

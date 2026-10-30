@@ -9,6 +9,8 @@ package store
 import (
 	"errors"
 	"log/slog"
+	"maps"
+	"slices"
 	"sync"
 
 	"rockets-service/internal/rocket"
@@ -162,6 +164,54 @@ func (s *Store) List() []rocket.Rocket {
 		if r := e.snapshot(); r.Launched() {
 			out = append(out, r)
 		}
+	}
+	return out
+}
+
+// ChannelInfo is the internal bookkeeping of one channel, for debugging.
+type ChannelInfo struct {
+	Channel  string `json:"channel"`
+	Launched bool   `json:"launched"`
+	Applied  int    `json:"applied"`
+	Pending  int    `json:"pendingCount"`
+	// PendingNumbers lists the lowest buffered message numbers, at most maxDebugPending.
+	PendingNumbers []int `json:"pendingNumbers"`
+}
+
+const maxDebugPending = 100
+
+// Debug returns every channel's watermark and buffer, sorted by channel,
+// including channels that have not launched yet.
+func (s *Store) Debug() []ChannelInfo {
+	s.mu.RLock()
+	channels := make([]string, 0, len(s.rockets))
+	entries := make(map[string]*entry, len(s.rockets))
+	for ch, e := range s.rockets {
+		channels = append(channels, ch)
+		entries[ch] = e
+	}
+	s.mu.RUnlock()
+	slices.Sort(channels)
+
+	out := make([]ChannelInfo, 0, len(channels))
+	for _, ch := range channels {
+		e := entries[ch]
+		e.mu.Lock()
+		info := ChannelInfo{
+			Channel:        ch,
+			Launched:       e.state.Launched(),
+			Applied:        e.applied,
+			Pending:        len(e.pending),
+			PendingNumbers: slices.Sorted(maps.Keys(e.pending)),
+		}
+		if info.PendingNumbers == nil {
+			info.PendingNumbers = []int{} // encode as [], not null
+		}
+		e.mu.Unlock()
+		if len(info.PendingNumbers) > maxDebugPending {
+			info.PendingNumbers = info.PendingNumbers[:maxDebugPending]
+		}
+		out = append(out, info)
 	}
 	return out
 }

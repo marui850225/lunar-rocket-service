@@ -192,3 +192,15 @@ func TestRoutingAndHealth(t *testing.T) {
 		t.Fatalf("GET /messages: %d, want 405", rec.Code)
 	}
 }
+
+func TestDebugStore(t *testing.T) {
+	h := newServer(t, 0)
+	do(t, h, "POST", "/messages", message("a", 3, "RocketSpeedIncreased", `{"by":1}`))
+	do(t, h, "POST", "/messages", launched("b", "Atlas", 1))
+	rec := do(t, h, "GET", "/debug/store", "")
+	want := `[{"channel":"a","launched":false,"applied":0,"pendingCount":1,"pendingNumbers":[3]},` +
+		`{"channel":"b","launched":true,"applied":1,"pendingCount":0,"pendingNumbers":[]}]`
+	if got := strings.TrimSpace(rec.Body.String()); rec.Code != 200 || got != want {
+		t.Fatalf("status %d body\n got  %s\n want %s", rec.Code, got, want)
+	}
+}

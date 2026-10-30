@@ -251,3 +251,21 @@ func TestConcurrentIngest(t *testing.T) {
 		t.Errorf("List len %d, want %d", got, rockets)
 	}
 }
+
+func TestDebug(t *testing.T) {
+	s := New(quiet, 0)
+	mustIngest(t, s, launch("b"))
+	mustIngest(t, s, up("b", 2, 1))
+	mustIngest(t, s, up("b", 5, 1))
+	mustIngest(t, s, up("b", 4, 1))
+	mustIngest(t, s, up("a", 3, 1)) // not launched yet
+
+	got := s.Debug()
+	want := []ChannelInfo{
+		{Channel: "a", Launched: false, Applied: 0, Pending: 1, PendingNumbers: []int{3}},
+		{Channel: "b", Launched: true, Applied: 2, Pending: 2, PendingNumbers: []int{4, 5}},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("Debug =\n %+v\nwant\n %+v", got, want)
+	}
+}
