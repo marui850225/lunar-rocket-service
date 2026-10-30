@@ -33,3 +33,9 @@ How AI (Claude Code) was used on this challenge: what was delegated, what was ve
 - AI drafted the store (watermark + pending map, pending cap, map RWMutex + per-rocket mutex) and its tests.
 - Tests: worked example from the design doc, duplicate-of-pending, hidden-until-launched, buffer-full/backpressure, 1,000-seed shuffle+duplicate property test against a naive in-order oracle, 16-writer + 2-reader concurrency test under `-race`.
 - Verified the tests can fail (mutation testing, by hand): removing applied-dedup, draining pending out of order, and removing the per-rocket lock each make the suite fail (the last via the race detector and a fatal concurrent map write).
+
+### 5. `internal/api` + `main.go`
+
+- AI drafted handlers (status codes per design: 200 applied/buffered/duplicate, 400 invalid, 503 + Retry-After when the buffer is full, 500 without leaking internals), sorting with id tiebreak, JSON shape, and `main.go` with timeouts and graceful shutdown on SIGINT/SIGTERM.
+- Tests: `httptest` for every status code, a fake store for the 500 path, exact JSON shape, 404 for unknown/unlaunched, every sort field and order, 400 for bad sort/order, 405 on wrong method.
+- Verified against the real binary (defaults, 100,000 messages, 45 s): no errors on either side; final state of all 20 rockets matches an independent Python fold of an earlier capture (same seed) field by field.
