@@ -64,7 +64,6 @@ func decode(data []byte) (model.Message, error) {
 		Channel: md.Channel,
 		Number:  md.MessageNumber,
 		Time:    md.MessageTime,
-		Type:    md.MessageType,
 		Payload: payload,
 	}, nil
 }

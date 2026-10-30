@@ -92,18 +92,18 @@ func TestMissingRocket(t *testing.T) {
 	})
 }
 
-func msg(n int, p model.Payload, typ model.MessageType) model.Message {
-	return model.Message{Channel: "a", Number: n, Time: time.Date(2022, 2, 2, 10, 0, n, 0, plusOne), Type: typ, Payload: p}
+func msg(n int, p model.Payload) model.Message {
+	return model.Message{Channel: "a", Number: n, Time: time.Date(2022, 2, 2, 10, 0, n, 0, plusOne), Payload: p}
 }
 
 func TestPending(t *testing.T) {
 	db, _ := open(t)
 	in := []model.Message{
-		msg(5, model.Exploded{Reason: "X"}, model.TypeExploded),
-		msg(2, model.Launched{RocketType: "Atlas", LaunchSpeed: 9, Mission: "M"}, model.TypeLaunched),
-		msg(4, model.MissionChanged{NewMission: "N"}, model.TypeMissionChanged),
-		msg(3, model.SpeedDecreased{By: 7}, model.TypeSpeedDecreased),
-		msg(1, model.SpeedIncreased{By: 6}, model.TypeSpeedIncreased),
+		msg(5, model.Exploded{Reason: "X"}),
+		msg(2, model.Launched{RocketType: "Atlas", LaunchSpeed: 9, Mission: "M"}),
+		msg(4, model.MissionChanged{NewMission: "N"}),
+		msg(3, model.SpeedDecreased{By: 7}),
+		msg(1, model.SpeedIncreased{By: 6}),
 	}
 	inChannel(t, db, "a", func(tx storage.Tx) error {
 		for _, m := range in {
@@ -111,42 +111,40 @@ func TestPending(t *testing.T) {
 				t.Fatalf("AddPending #%d: %v %v", m.Number, added, err)
 			}
 		}
-		if added, err := tx.AddPending(msg(3, model.SpeedDecreased{By: 999}, model.TypeSpeedDecreased)); added || err != nil {
+		if added, err := tx.AddPending(msg(3, model.SpeedDecreased{By: 999})); added || err != nil {
 			t.Fatalf("duplicate AddPending: added=%v err=%v", added, err)
 		}
 		return nil
 	})
 
 	inChannel(t, db, "a", func(tx storage.Tx) error {
-		got, err := tx.PendingAfter(1)
-		if err != nil {
-			return err
-		}
-		if len(got) != 4 {
-			t.Fatalf("PendingAfter(1) returned %d messages", len(got))
-		}
-		for i, want := range []int{2, 3, 4, 5} {
-			g := got[i]
-			var src model.Message
-			for _, m := range in {
-				if m.Number == want {
-					src = m
-				}
+		for _, src := range in {
+			g, found, err := tx.Pending(src.Number)
+			if err != nil || !found {
+				t.Fatalf("Pending(%d): found=%v err=%v", src.Number, found, err)
 			}
-			if g.Number != want || g.Channel != "a" || g.Type != src.Type || g.Payload != src.Payload || !g.Time.Equal(src.Time) {
-				t.Errorf("pending[%d] = %+v, want %+v", i, g, src)
+			if g.Number != src.Number || g.Channel != "a" || g.Type() != src.Type() || g.Payload != src.Payload || !g.Time.Equal(src.Time) {
+				t.Errorf("Pending(%d) = %+v, want %+v", src.Number, g, src)
 			}
 		}
-		if g := got[1].Payload.(model.SpeedDecreased); g.By != 7 {
-			t.Errorf("duplicate overwrote first copy: %+v", g)
+		if g, _, _ := tx.Pending(3); g.Payload.(model.SpeedDecreased).By != 7 {
+			t.Errorf("duplicate overwrote first copy: %+v", g.Payload)
+		}
+		if _, found, err := tx.Pending(99); found || err != nil {
+			t.Errorf("Pending(99): found=%v err=%v", found, err)
 		}
 
-		if err := tx.DeletePending(2, 3); err != nil {
+		if err := tx.DeletePending(2, 4); err != nil {
 			return err
 		}
 		n, err := tx.CountPending()
-		if n != 3 {
-			t.Errorf("CountPending = %d, want 3", n)
+		if n != 2 {
+			t.Errorf("CountPending after deleting 2..4 = %d, want 2 (1 and 5 left)", n)
+		}
+		for _, k := range []int{1, 5} {
+			if _, found, _ := tx.Pending(k); !found {
+				t.Errorf("Pending(%d) deleted by DeletePending(2, 4)", k)
+			}
 		}
 		return err
 	})
@@ -157,7 +155,7 @@ func TestRollbackOnError(t *testing.T) {
 	boom := errors.New("boom")
 	err := db.InChannel(ctx, "a", func(tx storage.Tx) error {
 		tx.SaveRocket(sampleRocket("a"))
-		tx.AddPending(msg(9, model.SpeedIncreased{By: 1}, model.TypeSpeedIncreased))
+		tx.AddPending(msg(9, model.SpeedIncreased{By: 1}))
 		return boom
 	})
 	if !errors.Is(err, boom) {
@@ -242,11 +240,11 @@ func TestChannels(t *testing.T) {
 		return tx.SaveRocket(model.Rocket{ID: "b", Status: model.StatusActive, LastMessageNumber: 2})
 	})
 	inChannel(t, db, "b", func(tx storage.Tx) error {
-		_, err := tx.AddPending(model.Message{Channel: "b", Number: 4, Time: time.Now(), Type: model.TypeExploded, Payload: model.Exploded{}})
+		_, err := tx.AddPending(model.Message{Channel: "b", Number: 4, Time: time.Now(), Payload: model.Exploded{}})
 		return err
 	})
 	inChannel(t, db, "a", func(tx storage.Tx) error { // buffered only, no rocket row
-		_, err := tx.AddPending(model.Message{Channel: "a", Number: 3, Time: time.Now(), Type: model.TypeExploded, Payload: model.Exploded{}})
+		_, err := tx.AddPending(model.Message{Channel: "a", Number: 3, Time: time.Now(), Payload: model.Exploded{}})
 		return err
 	})
 
@@ -276,7 +274,7 @@ func TestSurvivesReopen(t *testing.T) {
 		if err := tx.SaveRocket(sampleRocket("a")); err != nil {
 			return err
 		}
-		_, err := tx.AddPending(msg(60, model.SpeedIncreased{By: 1}, model.TypeSpeedIncreased))
+		_, err := tx.AddPending(msg(60, model.SpeedIncreased{By: 1}))
 		return err
 	})
 	db.Close()
@@ -321,5 +319,73 @@ func TestPragmasApplied(t *testing.T) {
 	}
 	if _, err := db.reader.Exec(`DELETE FROM rockets`); err == nil {
 		t.Error("reader connection accepted a write")
+	}
+}
+
+func TestPanicInTransactionRollsBackAndReleasesWriter(t *testing.T) {
+	db, _ := open(t)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("panic was swallowed")
+			}
+		}()
+		db.InChannel(ctx, "a", func(tx storage.Tx) error {
+			tx.SaveRocket(sampleRocket("a"))
+			panic("boom")
+		})
+	}()
+	if _, found, _ := db.GetRocket(ctx, "a"); found {
+		t.Fatal("write from the panicking transaction was kept")
+	}
+
+	// The single writer connection must be free again. Before the fix this
+	// blocked forever; the timeout turns a hang into a failure.
+	done := make(chan error, 1)
+	go func() {
+		done <- db.InChannel(ctx, "b", func(tx storage.Tx) error { return tx.SaveRocket(sampleRocket("b")) })
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("writer still blocked after a panic")
+	}
+}
+
+func TestStoredPayloadFormat(t *testing.T) {
+	// The on-disk format is fixed: these strings must keep decoding even if
+	// model field names change.
+	good := map[model.MessageType]string{
+		model.TypeLaunched:       `{"type":"Atlas","launchSpeed":5,"mission":"M"}`,
+		model.TypeSpeedIncreased: `{"by":3}`,
+		model.TypeSpeedDecreased: `{"by":0}`,
+		model.TypeMissionChanged: `{"newMission":"N"}`,
+		model.TypeExploded:       `{"reason":""}`,
+	}
+	for typ, body := range good {
+		p, err := decodePayload(typ, body)
+		if err != nil || p.Type() != typ {
+			t.Errorf("%s %s: %v, %v", typ, body, p, err)
+		}
+		again, _ := encodePayload(p)
+		if again != body {
+			t.Errorf("%s: re-encoded as %s, want %s", typ, again, body)
+		}
+	}
+	for _, bad := range []struct {
+		typ  model.MessageType
+		body string
+	}{
+		{model.TypeLaunched, `{"RocketType":"Atlas","launchSpeed":5,"mission":"M"}`}, // old Go field name
+		{model.TypeLaunched, `{"type":"Atlas","mission":"M"}`},                       // missing field
+		{model.TypeSpeedIncreased, `{}`},
+		{model.TypeExploded, `{"reason":"x","extra":1}`},
+	} {
+		if _, err := decodePayload(bad.typ, bad.body); err == nil {
+			t.Errorf("%s %s decoded without error", bad.typ, bad.body)
+		}
 	}
 }

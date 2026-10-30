@@ -107,6 +107,24 @@ func TestPostMessageInternalError(t *testing.T) {
 	}
 }
 
+type cancelledService struct{ Service }
+
+func (cancelledService) Ingest(context.Context, []byte) (service.Result, error) {
+	return 0, fmt.Errorf("channel a message 1: %w", context.Canceled)
+}
+
+func TestPostMessageClientGone(t *testing.T) {
+	var logs strings.Builder
+	h := New(cancelledService{}, slog.New(slog.NewTextHandler(&logs, nil)))
+	rec := do(t, h, "POST", "/messages", launched("a", "Falcon-9", 500))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503", rec.Code)
+	}
+	if strings.Contains(logs.String(), "level=ERROR") {
+		t.Fatalf("cancelled request logged as an error: %s", logs.String())
+	}
+}
+
 func TestGetRocket(t *testing.T) {
 	h := newServer(t, 0)
 	do(t, h, "POST", "/messages", launched("a", "Falcon-9", 500))

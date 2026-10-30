@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,11 +46,20 @@ func run(addr, dbPath string, syncMode sqlite.Sync, maxPending int, logger *slog
 	if err != nil {
 		return err
 	}
-	defer db.Close() // after the HTTP server has drained in-flight requests
+	closeDB := sync.OnceValue(db.Close)
+	defer closeDB() // covers early returns; the shutdown path closes it explicitly
 
+	// inflight counts running handlers, so the database is closed only after
+	// the last one has finished with it, even if graceful shutdown times out.
+	var inflight sync.WaitGroup
+	handler := api.New(service.New(db, logger, maxPending), logger)
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           api.New(service.New(db, logger, maxPending), logger),
+		Addr: addr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			inflight.Add(1)
+			defer inflight.Done()
+			handler.ServeHTTP(w, r)
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -79,6 +89,13 @@ func run(addr, dbPath string, syncMode sqlite.Sync, maxPending int, logger *slog
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
+		// Requests are still running (e.g. queued for the single writer).
+		// Close cancels their contexts, so they return promptly.
+		logger.Warn("graceful shutdown timed out, closing connections", "err", err)
+		srv.Close()
+	}
+	inflight.Wait()
+	if err := closeDB(); err != nil {
 		return err
 	}
 	if err := <-errc; !errors.Is(err, http.ErrServerClosed) {

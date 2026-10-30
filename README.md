@@ -42,7 +42,7 @@ Without `make`: `go run ./cmd/server`. Flags:
 
 | Command | What it runs | Time |
 |---|---|---|
-| `make test` | All unit tests under the race detector, against real SQLite files | about 1 min |
+| `make test` | All unit tests under the race detector, against real SQLite files | about 1 to 2 min |
 | `go test -short ./...` | The same with fewer random seeds | about 10 s |
 | `make e2e` | The real `rockets` binary against the real server binary, checked against an independent reference | about 1 min |
 
@@ -55,7 +55,7 @@ Without `make`: `go run ./cmd/server`. Flags:
 | Ordering property test | `internal/service` | 200 seeded random orderings of a 100-message stream, each message delivered 1 to 3 times, all reach the same state as a naive in-order fold |
 | Concurrency test | `internal/service` | 16 writers and 2 readers over 8 rockets under `-race`; final state still matches |
 | HTTP tests | `internal/api` | Every status code, JSON shape, 404s, every sort field and order |
-| End to end | `e2e/` | **Defaults:** 100,000 messages in about 53 s; all 20 rockets match field by field. **Injected failures:** 10% of requests fail (half dropped, half with the reply lost), producing about 1,000 real duplicates and many gaps; state and buffers still match |
+| End to end | `e2e/` | **Defaults:** 100,000 messages in about a minute; all 20 rockets match field by field. **Injected failures:** 10% of requests fail (half dropped, half with the reply lost), producing about 1,000 real duplicates and many gaps; state and buffers still match |
 
 The tests were also checked to fail when the code is broken on purpose: skipping the duplicate check, applying buffered messages across a gap, or not deleting applied messages from `pending` each make the service tests fail, and removing deduplication makes the e2e failure scenario fail. The server was also killed with `kill -9` mid-run and restarted with its state intact. See `AI_WORKFLOW.md`.
 
@@ -145,6 +145,8 @@ CREATE TABLE pending (                    -- messages that arrived early
 
 Times are stored in UTC with fixed-width nanoseconds so that SQL `ORDER BY` on the text matches time order. Mixed offsets or trimmed nanoseconds would sort wrongly as text.
 
+Buffered message bodies are stored in a fixed JSON format with explicit field names, independent of the Go type names. Reading a row that does not match the format exactly (unknown or missing field) is an error, never a silent zero value.
+
 ### Ordering and deduplication
 
 Each message is processed in **one transaction**, and the loop that applies buffered messages runs in Go (`service.Ingest`):
@@ -174,7 +176,9 @@ SQLite allows one writer at a time, so the service holds no locks of its own:
 
 - **Writes** go through a single connection and start with `BEGIN IMMEDIATE`. Concurrent requests queue in Go instead of failing with `SQLITE_BUSY`, and each transaction reads, decides and commits atomically.
 - **Reads** use a separate read-only pool. In WAL mode they see the last committed state and never wait for the writer.
-- **Atomicity:** any error, including "buffer full", rolls the whole transaction back, so the rocket row and `pending` never disagree.
+- **Atomicity:** any error or panic, including "buffer full", rolls the whole transaction back, so the rocket row and `pending` never disagree and the writer connection is always released.
+- **Draining:** buffered successors are read one at a time and the loop stops at the first gap, so messages waiting behind a gap are never read. One range `DELETE` removes the applied run.
+- **Shutdown:** on SIGINT/SIGTERM the server stops accepting requests and waits for running ones (up to 10 s, then cancels them) before closing the database.
 
 ### Durability
 
@@ -202,6 +206,7 @@ There is one rule for anything that does not fit the lifecycle: **skip it, log a
 | `RocketLaunched` that is not message 1, or message 1 that is not `RocketLaunched` | Skipped; in the second case the rocket never becomes visible |
 | Same `(channel, messageNumber)` with a different body | The first copy wins; bodies are not compared |
 | Negative `by` | Rejected with `400` |
+| Speed change that would overflow `int64` | Skipped and logged; the speed keeps its last valid value |
 
 ### What the test program actually does
 

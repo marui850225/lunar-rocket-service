@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
@@ -114,11 +115,23 @@ func (db *DB) InChannel(ctx context.Context, channel string, fn func(storage.Tx)
 	if err != nil {
 		return err
 	}
+	// Roll back on any exit but a successful commit, including a panic in
+	// fn: otherwise the only writer connection would stay inside an open
+	// transaction and every later write would wait forever.
+	committed := false
+	defer func() {
+		if !committed {
+			sqlTx.Rollback()
+		}
+	}()
 	if err := fn(&tx{ctx: ctx, tx: sqlTx, channel: channel}); err != nil {
-		sqlTx.Rollback()
 		return err
 	}
-	return sqlTx.Commit()
+	if err := sqlTx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 const rocketColumns = `channel, type, speed, mission, status, explosion_reason, launched_at, updated_at, last_message_number`
@@ -175,8 +188,16 @@ func (db *DB) ListRockets(ctx context.Context, opts storage.ListOptions) ([]mode
 	return out, rows.Err()
 }
 
+// Channels reads every channel's bookkeeping in one read transaction, so
+// counts and number lists come from the same snapshot.
 func (db *DB) Channels(ctx context.Context) ([]storage.ChannelInfo, error) {
-	rows, err := db.reader.QueryContext(ctx, `
+	rtx, err := db.reader.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer rtx.Rollback()
+
+	rows, err := rtx.QueryContext(ctx, `
 		SELECT c.channel,
 		       r.status IS NOT NULL,
 		       COALESCE(r.last_message_number, 0),
@@ -187,13 +208,15 @@ func (db *DB) Channels(ctx context.Context) ([]storage.ChannelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []storage.ChannelInfo
+	out := []storage.ChannelInfo{}
+	index := map[string]int{}
 	for rows.Next() {
-		var ci storage.ChannelInfo
+		ci := storage.ChannelInfo{PendingNumbers: []int{}}
 		if err := rows.Scan(&ci.Channel, &ci.Launched, &ci.LastMessageNumber, &ci.PendingCount); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		index[ci.Channel] = len(out)
 		out = append(out, ci)
 	}
 	rows.Close()
@@ -201,31 +224,27 @@ func (db *DB) Channels(ctx context.Context) ([]storage.ChannelInfo, error) {
 		return nil, err
 	}
 
-	for i := range out {
-		out[i].PendingNumbers = []int{}
-		if out[i].PendingCount == 0 {
-			continue
-		}
-		nums, err := db.reader.QueryContext(ctx,
-			`SELECT message_number FROM pending WHERE channel = ? ORDER BY message_number LIMIT ?`,
-			out[i].Channel, maxDebugPending)
-		if err != nil {
+	nums, err := rtx.QueryContext(ctx, `
+		SELECT channel, message_number FROM (
+			SELECT channel, message_number,
+			       ROW_NUMBER() OVER (PARTITION BY channel ORDER BY message_number) AS rn
+			FROM pending)
+		WHERE rn <= ? ORDER BY channel, message_number`, maxDebugPending)
+	if err != nil {
+		return nil, err
+	}
+	defer nums.Close()
+	for nums.Next() {
+		var ch string
+		var n int
+		if err := nums.Scan(&ch, &n); err != nil {
 			return nil, err
 		}
-		for nums.Next() {
-			var n int
-			if err := nums.Scan(&n); err != nil {
-				nums.Close()
-				return nil, err
-			}
+		if i, ok := index[ch]; ok {
 			out[i].PendingNumbers = append(out[i].PendingNumbers, n)
 		}
-		nums.Close()
 	}
-	if out == nil {
-		out = []storage.ChannelInfo{}
-	}
-	return out, nil
+	return out, nums.Err()
 }
 
 // --- transaction -----------------------------------------------------------
@@ -267,7 +286,7 @@ func (t *tx) AddPending(m model.Message) (bool, error) {
 		INSERT INTO pending (channel, message_number, message_type, message_time, body)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT (channel, message_number) DO NOTHING`,
-		t.channel, m.Number, string(m.Type), formatTime(m.Time), body)
+		t.channel, m.Number, string(m.Type()), formatTime(m.Time), body)
 	if err != nil {
 		return false, err
 	}
@@ -275,45 +294,31 @@ func (t *tx) AddPending(m model.Message) (bool, error) {
 	return n == 1, err
 }
 
-func (t *tx) PendingAfter(after int) ([]model.Message, error) {
-	rows, err := t.tx.QueryContext(t.ctx, `
-		SELECT message_number, message_type, message_time, body FROM pending
-		WHERE channel = ? AND message_number > ? ORDER BY message_number`, t.channel, after)
+func (t *tx) Pending(number int) (model.Message, bool, error) {
+	var typ, msgTime, body string
+	err := t.tx.QueryRowContext(t.ctx, `
+		SELECT message_type, message_time, body FROM pending
+		WHERE channel = ? AND message_number = ?`, t.channel, number).Scan(&typ, &msgTime, &body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Message{}, false, nil
+	}
 	if err != nil {
-		return nil, err
+		return model.Message{}, false, err
 	}
-	defer rows.Close()
-	var out []model.Message
-	for rows.Next() {
-		var (
-			m       model.Message
-			typ     string
-			msgTime string
-			body    string
-		)
-		if err := rows.Scan(&m.Number, &typ, &msgTime, &body); err != nil {
-			return nil, err
-		}
-		m.Channel, m.Type = t.channel, model.MessageType(typ)
-		if m.Time, err = parseTime(msgTime); err != nil {
-			return nil, err
-		}
-		if m.Payload, err = decodePayload(m.Type, body); err != nil {
-			return nil, err
-		}
-		out = append(out, m)
+	m := model.Message{Channel: t.channel, Number: number}
+	if m.Time, err = parseTime(msgTime); err != nil {
+		return model.Message{}, false, err
 	}
-	return out, rows.Err()
+	if m.Payload, err = decodePayload(model.MessageType(typ), body); err != nil {
+		return model.Message{}, false, err
+	}
+	return m, true, nil
 }
 
-func (t *tx) DeletePending(numbers ...int) error {
-	for _, n := range numbers {
-		if _, err := t.tx.ExecContext(t.ctx,
-			`DELETE FROM pending WHERE channel = ? AND message_number = ?`, t.channel, n); err != nil {
-			return err
-		}
-	}
-	return nil
+func (t *tx) DeletePending(from, to int) error {
+	_, err := t.tx.ExecContext(t.ctx,
+		`DELETE FROM pending WHERE channel = ? AND message_number BETWEEN ? AND ?`, t.channel, from, to)
+	return err
 }
 
 func (t *tx) CountPending() (int, error) {
@@ -362,33 +367,100 @@ func nullTime(t time.Time) sql.NullString {
 
 func nullString(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }
 
-// Buffered payloads are stored as JSON of the model structs, keyed by type.
+// Buffered payloads are stored as JSON in the storage format below. Its tags
+// are fixed on purpose: renaming a model field must not change, or silently
+// misread, what is already on disk. Decoding rejects unknown fields and
+// requires every field, so a format mismatch is an error, not a zero value.
+
+type storedLaunched struct {
+	Type        *string `json:"type"`
+	LaunchSpeed *int64  `json:"launchSpeed"`
+	Mission     *string `json:"mission"`
+}
+
+type storedSpeed struct {
+	By *int64 `json:"by"`
+}
+
+type storedMission struct {
+	NewMission *string `json:"newMission"`
+}
+
+type storedExploded struct {
+	Reason *string `json:"reason"`
+}
 
 func encodePayload(p model.Payload) (string, error) {
-	b, err := json.Marshal(p)
+	var v any
+	switch p := p.(type) {
+	case model.Launched:
+		v = storedLaunched{Type: &p.RocketType, LaunchSpeed: &p.LaunchSpeed, Mission: &p.Mission}
+	case model.SpeedIncreased:
+		v = storedSpeed{By: &p.By}
+	case model.SpeedDecreased:
+		v = storedSpeed{By: &p.By}
+	case model.MissionChanged:
+		v = storedMission{NewMission: &p.NewMission}
+	case model.Exploded:
+		v = storedExploded{Reason: &p.Reason}
+	default:
+		return "", fmt.Errorf("unknown payload %T", p)
+	}
+	b, err := json.Marshal(v)
 	return string(b), err
 }
 
 func decodePayload(t model.MessageType, body string) (model.Payload, error) {
+	missing := fmt.Errorf("decoding pending %s body %s: missing field", t, body)
 	switch t {
 	case model.TypeLaunched:
-		return unmarshalAs[model.Launched](t, body)
-	case model.TypeSpeedIncreased:
-		return unmarshalAs[model.SpeedIncreased](t, body)
-	case model.TypeSpeedDecreased:
-		return unmarshalAs[model.SpeedDecreased](t, body)
+		var v storedLaunched
+		if err := strictUnmarshal(t, body, &v); err != nil {
+			return nil, err
+		}
+		if v.Type == nil || v.LaunchSpeed == nil || v.Mission == nil {
+			return nil, missing
+		}
+		return model.Launched{RocketType: *v.Type, LaunchSpeed: *v.LaunchSpeed, Mission: *v.Mission}, nil
+	case model.TypeSpeedIncreased, model.TypeSpeedDecreased:
+		var v storedSpeed
+		if err := strictUnmarshal(t, body, &v); err != nil {
+			return nil, err
+		}
+		if v.By == nil {
+			return nil, missing
+		}
+		if t == model.TypeSpeedIncreased {
+			return model.SpeedIncreased{By: *v.By}, nil
+		}
+		return model.SpeedDecreased{By: *v.By}, nil
 	case model.TypeMissionChanged:
-		return unmarshalAs[model.MissionChanged](t, body)
+		var v storedMission
+		if err := strictUnmarshal(t, body, &v); err != nil {
+			return nil, err
+		}
+		if v.NewMission == nil {
+			return nil, missing
+		}
+		return model.MissionChanged{NewMission: *v.NewMission}, nil
 	case model.TypeExploded:
-		return unmarshalAs[model.Exploded](t, body)
+		var v storedExploded
+		if err := strictUnmarshal(t, body, &v); err != nil {
+			return nil, err
+		}
+		if v.Reason == nil {
+			return nil, missing
+		}
+		return model.Exploded{Reason: *v.Reason}, nil
 	}
 	return nil, fmt.Errorf("unknown message type %q in pending", t)
 }
 
-func unmarshalAs[P model.Payload](t model.MessageType, body string) (model.Payload, error) {
-	var p P
-	if err := json.Unmarshal([]byte(body), &p); err != nil {
-		return nil, fmt.Errorf("decoding pending %s body: %w", t, err)
+func strictUnmarshal(t model.MessageType, body string, v any) error {
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return fmt.Errorf("decoding pending %s body: %w", t, err)
 	}
-	return p, nil
+	return nil
 }

@@ -87,7 +87,7 @@ func TestDecodeRealSample(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if m.Type != model.TypeLaunched || m.Payload != (model.Launched{RocketType: "Athena", LaunchSpeed: 500, Mission: "APOLLO"}) {
+	if m.Type() != model.TypeLaunched || m.Payload != (model.Launched{RocketType: "Athena", LaunchSpeed: 500, Mission: "APOLLO"}) {
 		t.Fatalf("got %+v", m)
 	}
 }

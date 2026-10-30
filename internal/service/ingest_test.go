@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -34,20 +35,7 @@ func newService(t testing.TB, maxPending int) (*Service, storage.Storage) {
 }
 
 func mk(channel string, n int, p model.Payload) model.Message {
-	var typ model.MessageType
-	switch p.(type) {
-	case model.Launched:
-		typ = model.TypeLaunched
-	case model.SpeedIncreased:
-		typ = model.TypeSpeedIncreased
-	case model.SpeedDecreased:
-		typ = model.TypeSpeedDecreased
-	case model.MissionChanged:
-		typ = model.TypeMissionChanged
-	case model.Exploded:
-		typ = model.TypeExploded
-	}
-	return model.Message{Channel: channel, Number: n, Time: t0.Add(time.Duration(n) * time.Second), Type: typ, Payload: p}
+	return model.Message{Channel: channel, Number: n, Time: t0.Add(time.Duration(n) * time.Second), Payload: p}
 }
 
 func launch(channel string) model.Message {
@@ -152,8 +140,12 @@ func TestBufferFull(t *testing.T) {
 	mustIngest(t, s, up("a", 3, 1))
 	mustIngest(t, s, up("a", 4, 1))
 
-	if _, err := s.ingest(ctx, up("a", 5, 1)); !errors.Is(err, ErrBufferFull) {
+	_, err := s.ingest(ctx, up("a", 5, 1))
+	if !errors.Is(err, ErrBufferFull) {
 		t.Fatalf("err = %v, want ErrBufferFull", err)
+	}
+	if !strings.Contains(err.Error(), "channel a message 5") {
+		t.Fatalf("error %q does not say which message", err)
 	}
 	if _, pending := bookkeeping(t, db, "a"); fmt.Sprint(pending) != "[3 4]" {
 		t.Fatalf("rejected message was kept: pending %v", pending)
@@ -331,5 +323,20 @@ func TestConcurrentIngest(t *testing.T) {
 	}
 	if got, _ := s.ListRockets(ctx, "", ""); len(got) != rockets {
 		t.Errorf("List len %d, want %d", len(got), rockets)
+	}
+}
+
+// BenchmarkIngestWithLargeBufferBehindGap: 9,000 messages wait behind a gap
+// at 1001 while in-order messages keep arriving. Each in-order ingest must
+// not read the buffered messages it cannot apply.
+func BenchmarkIngestWithLargeBufferBehindGap(b *testing.B) {
+	s, _ := newService(b, 0)
+	mustIngest(b, s, launch("a"))
+	for n := 1002; n <= 10001; n++ {
+		mustIngest(b, s, up("a", n, 1))
+	}
+	b.ResetTimer()
+	for i := range b.N {
+		mustIngest(b, s, up("a", i+2, 1)) // stays below the gap for b.N < 999
 	}
 }

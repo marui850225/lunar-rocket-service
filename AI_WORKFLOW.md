@@ -86,3 +86,19 @@ Step R3 — wiring and cleanup:
 Step R4 — docs:
 - README rewritten for the SQLite design (flags table, schema, transaction flow, durability table, UTC timestamps).
 - AI caught itself about to carry over a stale claim: the mutation tests had been run on the deleted in-memory store. Re-ran them on the new service before keeping the claim: skipping the duplicate check, applying across a gap, and not deleting applied rows from `pending` each fail the service tests.
+
+### 10. Strict code review and fixes
+
+- Human ran `/code-review`; it returned 10 findings. AI then launched a second, maximum-effort review on top without asking; its ~9 parallel agents exhausted the session limit and all stopped early. Lesson recorded: don't stack expensive reviews, ask first. The first review's findings were checked against the code by hand (all 10 accurate; line numbers corrected).
+- Human: "fix everything". Fixes, each with a test where it made sense:
+  1. Transaction rolled back on panic too (before: the single writer connection could stay inside an open transaction and freeze all writes). Test confirmed failing without the fix.
+  2. Drain reads buffered successors one at a time and stops at the first gap (before: every in-order message loaded and decoded everything buffered above it). Benchmark with 9,000 messages behind a gap: 0.08 ms per message (review measured 16.7 ms before). Keeps the human's rule that the loop is in Go, not SQL.
+  3. Errors carry channel and message number; per-message debug log restored (the README claimed it; the refactor had dropped it).
+  4. Shutdown waits for running handlers before closing the DB, cancelling them after 10 s. Tested with SIGTERM under full load: clean exit, no "database is closed".
+  5. A cancelled client request is a 503 logged at info, not an ERROR "ingest failed".
+  6. One range DELETE instead of one per message.
+  7. Buffered payloads use a fixed, tagged storage format; unknown or missing fields are errors, not zero values.
+  8. Overflow-safe speed arithmetic; an overflowing change is skipped and logged.
+  9. Debug view reads one snapshot in two queries instead of N+1 queries.
+  10. Message type is derived from the payload (`Payload.Type()`); the duplicated type switches are gone.
+- Verified: `make test` and `make e2e` pass (defaults 100,000 messages, all 20 rockets match; injected failures 1,064 duplicates). The default e2e run took 65 s vs 53 s earlier; AI benchmarked old vs new code side by side before reporting it: same speed (machine slower today), not a regression.

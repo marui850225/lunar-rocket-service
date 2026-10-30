@@ -16,17 +16,25 @@ const (
 	TypeExploded       MessageType = "RocketExploded"
 )
 
-// Message is one validated message. Payload holds the body matching Type.
+// Message is one validated message.
 type Message struct {
 	Channel string
 	Number  int
 	Time    time.Time
-	Type    MessageType
 	Payload Payload
 }
 
-// Payload is implemented by the five message bodies.
-type Payload interface{ isPayload() }
+// Type returns the message type, which is determined by the payload.
+func (m Message) Type() MessageType {
+	if m.Payload == nil {
+		return ""
+	}
+	return m.Payload.Type()
+}
+
+// Payload is implemented by the five message bodies. Each body knows its own
+// message type, so a message's type and body can never disagree.
+type Payload interface{ Type() MessageType }
 
 type Launched struct {
 	RocketType  string
@@ -42,11 +50,11 @@ type MissionChanged struct{ NewMission string }
 
 type Exploded struct{ Reason string }
 
-func (Launched) isPayload()       {}
-func (SpeedIncreased) isPayload() {}
-func (SpeedDecreased) isPayload() {}
-func (MissionChanged) isPayload() {}
-func (Exploded) isPayload()       {}
+func (Launched) Type() MessageType       { return TypeLaunched }
+func (SpeedIncreased) Type() MessageType { return TypeSpeedIncreased }
+func (SpeedDecreased) Type() MessageType { return TypeSpeedDecreased }
+func (MissionChanged) Type() MessageType { return TypeMissionChanged }
+func (Exploded) Type() MessageType       { return TypeExploded }
 
 // Status is a rocket's lifecycle state. The zero value means not launched yet.
 type Status string

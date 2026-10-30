@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 
 	"rockets-service/internal/model"
 	"rockets-service/internal/storage"
@@ -81,45 +82,44 @@ func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 			return nil
 		}
 
-		// m is the next message. Collect the contiguous run behind it.
-		run := []model.Message{m}
-		buffered, err := tx.PendingAfter(m.Number)
-		if err != nil {
-			return err
-		}
-		for _, p := range buffered {
-			if p.Number != run[len(run)-1].Number+1 {
+		// m is the next message: apply it, then each buffered successor in
+		// turn, stopping at the first missing number. Only the messages that
+		// are applied are read from storage, however many wait behind a gap.
+		r = s.applyAndLog(r, m)
+		last := m.Number
+		for {
+			next, found, err := tx.Pending(last + 1)
+			if err != nil {
+				return err
+			}
+			if !found {
 				break
 			}
-			run = append(run, p)
-		}
-
-		for _, next := range run {
 			r = s.applyAndLog(r, next)
+			last = next.Number
 		}
 		if err := tx.SaveRocket(r); err != nil {
 			return err
 		}
-		var drained []int
-		for _, p := range run[1:] {
-			drained = append(drained, p.Number)
-		}
-		if err := tx.DeletePending(drained...); err != nil {
-			return err
+		if last > m.Number {
+			if err := tx.DeletePending(m.Number+1, last); err != nil {
+				return err
+			}
 		}
 		res = Applied
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("channel %s message %d: %w", m.Channel, m.Number, err)
 	}
+	s.log.Debug("message ingested", "channel", m.Channel, "number", m.Number, "type", m.Type(), "result", res)
 	return res, nil
 }
 
 func (s *Service) applyAndLog(before model.Rocket, m model.Message) model.Rocket {
 	after, err := apply(before, m)
 	if err != nil {
-		s.log.Warn("message skipped", "channel", m.Channel, "number", m.Number, "type", m.Type, "reason", err)
+		s.log.Warn("message skipped", "channel", m.Channel, "number", m.Number, "type", m.Type(), "reason", err)
 	} else if after.Speed < 0 && before.Speed >= 0 {
 		s.log.Warn("speed went negative", "channel", m.Channel, "number", m.Number, "speed", after.Speed)
 	}

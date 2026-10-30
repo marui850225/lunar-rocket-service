@@ -2,26 +2,14 @@ package service
 
 import (
 	"errors"
+	"math"
 	"rockets-service/internal/model"
 	"testing"
 	"time"
 )
 
 func msg(n int, p model.Payload) model.Message {
-	var t model.MessageType
-	switch p.(type) {
-	case model.Launched:
-		t = model.TypeLaunched
-	case model.SpeedIncreased:
-		t = model.TypeSpeedIncreased
-	case model.SpeedDecreased:
-		t = model.TypeSpeedDecreased
-	case model.MissionChanged:
-		t = model.TypeMissionChanged
-	case model.Exploded:
-		t = model.TypeExploded
-	}
-	return model.Message{Channel: "ch-1", Number: n, Time: t0.Add(time.Duration(n) * time.Second), Type: t, Payload: p}
+	return model.Message{Channel: "ch-1", Number: n, Time: t0.Add(time.Duration(n) * time.Second), Payload: p}
 }
 
 func launchN(n int) model.Message {
@@ -94,6 +82,35 @@ func TestApply(t *testing.T) {
 			wantErr:  errLaunchNotFirst,
 		},
 	}
+
+	// Overflow is skipped like any other invalid-in-this-state message.
+	tests = append(tests,
+		struct {
+			name     string
+			messages []model.Message
+			want     model.Rocket
+			wantErr  error
+		}{
+			name:     "speed increase that would overflow is skipped",
+			messages: []model.Message{launchN(1), msg(2, model.SpeedIncreased{By: math.MaxInt64})},
+			want: model.Rocket{ID: "ch-1", Type: "Falcon-9", Speed: 500, Mission: "ARTEMIS", Status: model.StatusActive,
+				LaunchedAt: t0.Add(1 * time.Second), UpdatedAt: t0.Add(2 * time.Second), LastMessageNumber: 2},
+			wantErr: errSpeedOverflow,
+		},
+		struct {
+			name     string
+			messages []model.Message
+			want     model.Rocket
+			wantErr  error
+		}{
+			name: "speed decrease that would overflow is skipped",
+			messages: []model.Message{launchN(1), msg(2, model.SpeedDecreased{By: math.MaxInt64}),
+				msg(3, model.SpeedDecreased{By: math.MaxInt64})},
+			want: model.Rocket{ID: "ch-1", Type: "Falcon-9", Speed: 500 - math.MaxInt64, Mission: "ARTEMIS", Status: model.StatusActive,
+				LaunchedAt: t0.Add(1 * time.Second), UpdatedAt: t0.Add(3 * time.Second), LastMessageNumber: 3},
+			wantErr: errSpeedOverflow,
+		},
+	)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

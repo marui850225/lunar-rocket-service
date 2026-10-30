@@ -39,9 +39,10 @@ type Tx interface {
 	// AddPending buffers a message. added is false if a message with the
 	// same number is already buffered.
 	AddPending(model.Message) (added bool, err error)
-	// PendingAfter returns buffered messages numbered above n, lowest first.
-	PendingAfter(n int) ([]model.Message, error)
-	DeletePending(numbers ...int) error
+	// Pending returns the buffered message with this number, if any.
+	Pending(number int) (m model.Message, found bool, err error)
+	// DeletePending removes buffered messages numbered from..to, inclusive.
+	DeletePending(from, to int) error
 	CountPending() (int, error)
 }
 

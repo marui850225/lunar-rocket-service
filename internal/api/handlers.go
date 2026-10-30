@@ -65,7 +65,7 @@ func (h *handler) postMessage(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case err != nil:
-		h.internalError(w, "ingest failed", err)
+		h.internalError(w, r, "ingest failed", err)
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"result": res.String()})
 	}
@@ -77,7 +77,7 @@ func (h *handler) getRocket(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, service.ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case err != nil:
-		h.internalError(w, "get rocket failed", err)
+		h.internalError(w, r, "get rocket failed", err)
 	default:
 		writeJSON(w, http.StatusOK, toJSON(rk))
 	}
@@ -90,7 +90,7 @@ func (h *handler) listRockets(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, service.ErrInvalidSort):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case err != nil:
-		h.internalError(w, "list rockets failed", err)
+		h.internalError(w, r, "list rockets failed", err)
 	default:
 		out := make([]rocketJSON, len(rockets))
 		for i, rk := range rockets {
@@ -103,15 +103,22 @@ func (h *handler) listRockets(w http.ResponseWriter, r *http.Request) {
 func (h *handler) debug(w http.ResponseWriter, r *http.Request) {
 	infos, err := h.svc.Debug(r.Context())
 	if err != nil {
-		h.internalError(w, "debug failed", err)
+		h.internalError(w, r, "debug failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, infos)
 }
 
 // internalError logs the cause and returns a generic 500, so internal
-// details never reach the client.
-func (h *handler) internalError(w http.ResponseWriter, msg string, err error) {
+// details never reach the client. A request whose client went away (or
+// timed out) while it waited is not a server fault: it is logged quietly
+// and answered 503, which a still-listening sender may retry.
+func (h *handler) internalError(w http.ResponseWriter, r *http.Request, msg string, err error) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		h.log.Info(msg+": request cancelled", "err", err)
+		writeError(w, http.StatusServiceUnavailable, "request cancelled")
+		return
+	}
 	h.log.Error(msg, "err", err)
 	writeError(w, http.StatusInternalServerError, "internal error")
 }
