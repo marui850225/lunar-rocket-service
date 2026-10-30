@@ -52,3 +52,8 @@ How AI (Claude Code) was used on this challenge: what was delegated, what was ve
 - Scenarios: defaults (exactly how graders run it), and 10% injected failures.
 - AI caught a flaw in its own first version: injected failures only dropped requests, so the server never saw a duplicate (0 in the results). Added a "reply lost" mode (server processes the message, client gets 500) which produces ~1,000 real at-least-once duplicates per run.
 - Verified the e2e can fail: with dedup removed from the store, `TestInjectedFailures` fails.
+
+### 8. README
+
+- AI drafted the README from the design doc and the implementation; commands and example outputs re-run before committing (quick start against the real binary, sort error message, test timing).
+- AI lowered `go.mod` from `go 1.27.3` (the local toolchain) to `go 1.25`, the oldest version that has every feature used (`sync.WaitGroup.Go`), so graders aren't forced onto the newest release.
