@@ -44,3 +44,11 @@ How AI (Claude Code) was used on this challenge: what was delegated, what was ve
 
 - Human asked how to inspect the in-memory store; AI proposed and added read-only `GET /debug/store` (per-channel watermark, pending count, lowest 100 pending numbers, including unlaunched channels).
 - While demoing it, AI found a real bug in its own `main.go`: "listening" was logged before the bind, so a port conflict looked like a successful start. Fixed by binding with `net.Listen` first, then logging.
+
+### 7. End-to-end test
+
+- Plan said `scripts/e2e.sh` (bash + Python reference). AI proposed, human accepted, a Go test (`e2e/`, build tag `e2e`, `make e2e`) instead: graders need only Go, and it is cross-platform.
+- Setup: real `rockets` binary → recording proxy → real server binary. The reference is a from-scratch fold of the messages the server accepted (no shared code), compared with `GET /rockets` and `GET /debug/store`.
+- Scenarios: defaults (exactly how graders run it), and 10% injected failures.
+- AI caught a flaw in its own first version: injected failures only dropped requests, so the server never saw a duplicate (0 in the results). Added a "reply lost" mode (server processes the message, client gets 500) which produces ~1,000 real at-least-once duplicates per run.
+- Verified the e2e can fail: with dedup removed from the store, `TestInjectedFailures` fails.

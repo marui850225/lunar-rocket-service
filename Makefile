@@ -1,6 +1,8 @@
 # Uses `go` from PATH, falling back to a user-local install.
 GO ?= $(shell command -v go 2>/dev/null || echo $(HOME)/.local/go/bin/go)
 ADDR ?= :8088
+# The provided test program; override if yours lives elsewhere.
+ROCKETS_BIN ?= $(HOME)/Downloads/lunar-backend-engineer-challenge-ai/$(shell $(GO) env GOOS)_$(shell $(GO) env GOARCH)/rockets
 
 .PHONY: run build test e2e fmt vet
 
@@ -13,8 +15,10 @@ build:
 test:
 	$(GO) test -race ./...
 
+# Real rockets binary -> recording proxy -> real server binary, checked against
+# an independent reference. Takes about a minute.
 e2e: build
-	./scripts/e2e.sh
+	ROCKETS_BIN=$(ROCKETS_BIN) SERVER_BIN=$(CURDIR)/bin/server $(GO) test -tags e2e -count=1 -v -timeout 10m ./e2e
 
 fmt:
 	$(GO) fmt ./...
