@@ -82,3 +82,7 @@ Step R3 — wiring and cleanup:
 - Evidence the refactor kept behaviour: the API tests passed with only setup, UTC timestamps and the debug field name changed; `TestListRockets` (now sorted by SQL) passed unchanged.
 - `make e2e` on the real disk: defaults 100,000 messages in 53 s (in-memory was 52 s), all 20 rockets match; injected failures: 1,061 real duplicates, all rockets and buffers match.
 - Crash test: server killed with `kill -9` mid-run (after ~14,700 messages), restarted on the same file: all 20 rockets and their state were there (WAL replayed), nothing left pending.
+
+Step R4 — docs:
+- README rewritten for the SQLite design (flags table, schema, transaction flow, durability table, UTC timestamps).
+- AI caught itself about to carry over a stale claim: the mutation tests had been run on the deleted in-memory store. Re-ran them on the new service before keeping the claim: skipping the duplicate check, applying across a gap, and not deleting applied rows from `pending` each fail the service tests.
