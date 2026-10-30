@@ -102,3 +102,8 @@ Step R4 — docs:
   9. Debug view reads one snapshot in two queries instead of N+1 queries.
   10. Message type is derived from the payload (`Payload.Type()`); the duplicated type switches are gone.
 - Verified: `make test` and `make e2e` pass (defaults 100,000 messages, all 20 rockets match; injected failures 1,064 duplicates). The default e2e run took 65 s vs 53 s earlier; AI benchmarked old vs new code side by side before reporting it: same speed (machine slower today), not a regression.
+
+### 11. Second test round (fresh clone)
+
+- Human asked for another round of testing. AI ran it on a fresh clone from GitHub, as a grader would: `gofmt`, `go vet` (incl. e2e), `make test`, `make e2e` all pass (defaults: 20 rockets match field by field; injected failures: 1,064 duplicates, all rockets and buffers match).
+- New crash-and-replay test: server killed with `kill -9` 20 s into a run, restarted on the same database (20 rockets, ~33,900 messages processed), then the whole test program replayed from message 1. Final state compared with a separate uninterrupted run: 0 differences in type, speed, mission, status, reason and lastMessageNumber; 6/6 exploded; nothing pending; no errors or panics in any server log.

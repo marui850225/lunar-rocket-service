@@ -57,7 +57,7 @@ Without `make`: `go run ./cmd/server`. Flags:
 | HTTP tests | `internal/api` | Every status code, JSON shape, 404s, every sort field and order |
 | End to end | `e2e/` | **Defaults:** 100,000 messages in about a minute; all 20 rockets match field by field. **Injected failures:** 10% of requests fail (half dropped, half with the reply lost), producing about 1,000 real duplicates and many gaps; state and buffers still match |
 
-The tests were also checked to fail when the code is broken on purpose: skipping the duplicate check, applying buffered messages across a gap, or not deleting applied messages from `pending` each make the service tests fail, and removing deduplication makes the e2e failure scenario fail. The server was also killed with `kill -9` mid-run and restarted with its state intact. See `AI_WORKFLOW.md`.
+The tests were also checked to fail when the code is broken on purpose: skipping the duplicate check, applying buffered messages across a gap, or not deleting applied messages from `pending` each make the service tests fail, and removing deduplication makes the e2e failure scenario fail. The server was also killed with `kill -9` mid-run and restarted on the same database; the whole test program was then replayed from message 1 (about 34,000 duplicates followed by new messages). The final state matched an uninterrupted run exactly: 20 rockets, 6 exploded, 0 differences, nothing left pending. See `AI_WORKFLOW.md`.
 
 ## API
 
