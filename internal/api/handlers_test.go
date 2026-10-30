@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,18 +9,24 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"rockets-service/internal/rocket"
-	"rockets-service/internal/store"
+	"rockets-service/internal/service"
+	"rockets-service/internal/storage/sqlite"
 )
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 func newServer(t *testing.T, maxPending int) http.Handler {
 	t.Helper()
-	return New(store.New(quiet, maxPending), quiet)
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "api.db"), sqlite.SyncNormal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return New(service.New(db, quiet, maxPending), quiet)
 }
 
 func do(t *testing.T, h http.Handler, method, target, body string) *httptest.ResponseRecorder {
@@ -83,14 +90,14 @@ func TestPostMessageStatusCodes(t *testing.T) {
 	}
 }
 
-type failingStore struct{ Store }
+type failingService struct{ Service }
 
-func (failingStore) Ingest(rocket.Message) (store.Result, error) {
+func (failingService) Ingest(context.Context, []byte) (service.Result, error) {
 	return 0, errors.New("disk on fire")
 }
 
 func TestPostMessageInternalError(t *testing.T) {
-	h := New(failingStore{}, quiet)
+	h := New(failingService{}, quiet)
 	rec := do(t, h, "POST", "/messages", launched("a", "Falcon-9", 500))
 	if rec.Code != 500 {
 		t.Fatalf("status %d, want 500", rec.Code)
@@ -111,7 +118,7 @@ func TestGetRocket(t *testing.T) {
 		t.Fatalf("status %d", rec.Code)
 	}
 	want := `{"id":"a","type":"Falcon-9","speed":3500,"mission":"ARTEMIS","status":"ACTIVE","explosionReason":null,` +
-		`"launchedAt":"2022-02-02T19:39:01+01:00","updatedAt":"2022-02-02T19:39:02+01:00","lastMessageNumber":2}`
+		`"launchedAt":"2022-02-02T18:39:01Z","updatedAt":"2022-02-02T18:39:02Z","lastMessageNumber":2}`
 	if got := strings.TrimSpace(rec.Body.String()); got != want {
 		t.Fatalf("body\n got  %s\n want %s", got, want)
 	}
@@ -198,8 +205,8 @@ func TestDebugStore(t *testing.T) {
 	do(t, h, "POST", "/messages", message("a", 3, "RocketSpeedIncreased", `{"by":1}`))
 	do(t, h, "POST", "/messages", launched("b", "Atlas", 1))
 	rec := do(t, h, "GET", "/debug/store", "")
-	want := `[{"channel":"a","launched":false,"applied":0,"pendingCount":1,"pendingNumbers":[3]},` +
-		`{"channel":"b","launched":true,"applied":1,"pendingCount":0,"pendingNumbers":[]}]`
+	want := `[{"channel":"a","launched":false,"lastMessageNumber":0,"pendingCount":1,"pendingNumbers":[3]},` +
+		`{"channel":"b","launched":true,"lastMessageNumber":1,"pendingCount":0,"pendingNumbers":[]}]`
 	if got := strings.TrimSpace(rec.Body.String()); rec.Code != 200 || got != want {
 		t.Fatalf("status %d body\n got  %s\n want %s", rec.Code, got, want)
 	}

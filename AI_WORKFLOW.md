@@ -75,3 +75,10 @@ Step 2 — `service`:
 - AI moved `Decode`/`Apply` into `service` (decode.go, apply.go; old tests ported mechanically, unchanged assertions) and wrote `Ingest` (one storage transaction per message: watermark check, buffer with cap checked after the duplicate check, apply the contiguous run, delete it), `GetRocket` (hides unlaunched), `ListRockets` (sort/order validation and defaults → `storage.ListOptions`).
 - Tests against real SQLite: the 1,7,5,4,3,2 example step by step, duplicate-of-pending keeps first copy, hidden until launched, buffer full incl. rollback of the rejected insert, invalid input never touches storage, 200-seed shuffle+duplicate property test, 16-writer + 2-reader concurrency test under `-race`.
 - AI measured a problem before wiring it in: with `synchronous=FULL` one ingest costs 6.4 ms on NVMe (~155 msg/s, ~11 min for the graders' default run) vs 0.065 ms with `NORMAL`. A first benchmark on `/tmp` looked fine only because `/tmp` is tmpfs here. Decision handed to the human.
+
+Step R3 — wiring and cleanup:
+- Human chose `synchronous=NORMAL` as the default after the measurement was explained; AI added `-sync normal|full` (validated; a test checks both modes really set the pragma).
+- `api` now calls only `service` through a small interface (errors mapped: ErrInvalid→400, ErrNotFound→404, ErrInvalidSort→400, ErrBufferFull→503, other→500 without details). `main.go` gets `-db` and `-sync`; DB closed after the HTTP server drains. `internal/rocket` and `internal/store` deleted.
+- Evidence the refactor kept behaviour: the API tests passed with only setup, UTC timestamps and the debug field name changed; `TestListRockets` (now sorted by SQL) passed unchanged.
+- `make e2e` on the real disk: defaults 100,000 messages in 53 s (in-memory was 52 s), all 20 rockets match; injected failures: 1,061 real duplicates, all rockets and buffers match.
+- Crash test: server killed with `kill -9` mid-run (after ~14,700 messages), restarted on the same file: all 20 rockets and their state were there (WAL replayed), nothing left pending.

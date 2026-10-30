@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-
 func msg(n int, p model.Payload) model.Message {
 	var t model.MessageType
 	switch p.(type) {

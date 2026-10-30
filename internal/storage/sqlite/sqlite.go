@@ -58,9 +58,30 @@ type DB struct {
 
 var _ storage.Storage = (*DB)(nil)
 
+// Sync sets how often SQLite fsyncs, trading durability for speed.
+type Sync string
+
+const (
+	// SyncNormal fsyncs at WAL checkpoints only. A commit survives a crash of
+	// this process; an OS crash or power loss can lose the last few commits,
+	// but never corrupts the database. About 100x faster than SyncFull.
+	SyncNormal Sync = "normal"
+	// SyncFull fsyncs every commit: a commit survives power loss.
+	SyncFull Sync = "full"
+)
+
 // Open opens (creating if needed) the database file at path.
-func Open(path string) (*DB, error) {
-	pragmas := "_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)"
+func Open(path string, sync Sync) (*DB, error) {
+	var level string
+	switch sync {
+	case SyncNormal:
+		level = "NORMAL"
+	case SyncFull:
+		level = "FULL"
+	default:
+		return nil, fmt.Errorf("unknown sync mode %q (want normal or full)", sync)
+	}
+	pragmas := "_pragma=journal_mode(WAL)&_pragma=synchronous(" + level + ")&_pragma=busy_timeout(5000)"
 	base := "file:" + url.PathEscape(path) + "?" + pragmas
 
 	writer, err := sql.Open("sqlite", base+"&_txlock=immediate")

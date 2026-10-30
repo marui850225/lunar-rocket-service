@@ -1,3 +1,6 @@
 /bin/
 *.jsonl
 *.log
+*.db
+*.db-wal
+*.db-shm

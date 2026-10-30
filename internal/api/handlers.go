@@ -1,51 +1,47 @@
-// Package api is the HTTP layer: it decodes requests, calls the store, and
-// maps outcomes to status codes. It holds no rocket state of its own.
+// Package api is the HTTP layer: it reads requests, calls the service, and
+// maps outcomes to status codes and JSON. It holds no business rules.
 package api
 
 import (
-	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"slices"
-	"strings"
 	"time"
 
-	"rockets-service/internal/rocket"
-	"rockets-service/internal/store"
+	"rockets-service/internal/model"
+	"rockets-service/internal/service"
+	"rockets-service/internal/storage"
 )
 
 // maxBodyBytes bounds a POST /messages body; real messages are ~300 bytes.
 const maxBodyBytes = 64 << 10
 
-// Store is what the handlers need from the store.
-type Store interface {
-	Ingest(rocket.Message) (store.Result, error)
-	Get(channel string) (rocket.Rocket, bool)
-	List() []rocket.Rocket
-	Debug() []store.ChannelInfo
+// Service is what the handlers need from the service layer.
+type Service interface {
+	Ingest(ctx context.Context, body []byte) (service.Result, error)
+	GetRocket(ctx context.Context, id string) (model.Rocket, error)
+	ListRockets(ctx context.Context, sortBy, order string) ([]model.Rocket, error)
+	Debug(ctx context.Context) ([]storage.ChannelInfo, error)
 }
 
 type handler struct {
-	store Store
-	log   *slog.Logger
+	svc Service
+	log *slog.Logger
 }
 
 // New returns the service's HTTP handler.
-func New(s Store, log *slog.Logger) http.Handler {
-	h := &handler{store: s, log: log}
+func New(svc Service, log *slog.Logger) http.Handler {
+	h := &handler{svc: svc, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /messages", h.postMessage)
 	mux.HandleFunc("GET /rockets", h.listRockets)
 	mux.HandleFunc("GET /rockets/{channel}", h.getRocket)
 	// Read-only view of internal bookkeeping (watermark, pending buffer) for
 	// debugging and demos. Would sit behind auth or an admin port in production.
-	mux.HandleFunc("GET /debug/store", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, s.Debug())
-	})
+	mux.HandleFunc("GET /debug/store", h.debug)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, "ok\n")
 	})
@@ -58,107 +54,86 @@ func (h *handler) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "reading body: "+err.Error())
 		return
 	}
-	msg, err := rocket.Decode(body)
-	if err != nil {
+
+	res, err := h.svc.Ingest(r.Context(), body)
+	switch {
+	case errors.Is(err, service.ErrInvalid):
 		h.log.Warn("invalid message rejected", "err", err)
 		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	res, err := h.store.Ingest(msg)
-	switch {
-	case errors.Is(err, store.ErrBufferFull):
-		h.log.Warn("pending buffer full, asking for redelivery", "channel", msg.Channel, "number", msg.Number)
+	case errors.Is(err, service.ErrBufferFull):
+		h.log.Warn("pending buffer full, asking for redelivery", "err", err)
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
 	case err != nil:
-		h.log.Error("ingest failed", "channel", msg.Channel, "number", msg.Number, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+		h.internalError(w, "ingest failed", err)
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"result": res.String()})
 	}
-	h.log.Debug("message ingested", "channel", msg.Channel, "number", msg.Number, "type", msg.Type, "result", res)
-	writeJSON(w, http.StatusOK, map[string]string{"result": res.String()})
 }
 
 func (h *handler) getRocket(w http.ResponseWriter, r *http.Request) {
-	rk, ok := h.store.Get(r.PathValue("channel"))
-	if !ok {
-		writeError(w, http.StatusNotFound, "rocket not found")
-		return
+	rk, err := h.svc.GetRocket(r.Context(), r.PathValue("channel"))
+	switch {
+	case errors.Is(err, service.ErrNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case err != nil:
+		h.internalError(w, "get rocket failed", err)
+	default:
+		writeJSON(w, http.StatusOK, toJSON(rk))
 	}
-	writeJSON(w, http.StatusOK, toJSON(rk))
 }
 
 func (h *handler) listRockets(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	sortBy := cmp.Or(q.Get("sort"), "launchedAt")
-	order := cmp.Or(q.Get("order"), "asc")
-
-	compare, ok := sortFields[sortBy]
-	if !ok {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown sort field %q (want one of %s)", sortBy, sortFieldNames))
-		return
-	}
-	if order != "asc" && order != "desc" {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown order %q (want asc or desc)", order))
-		return
-	}
-
-	rockets := h.store.List()
-	slices.SortFunc(rockets, func(a, b rocket.Rocket) int {
-		c := compare(a, b)
-		if order == "desc" {
-			c = -c
+	rockets, err := h.svc.ListRockets(r.Context(), q.Get("sort"), q.Get("order"))
+	switch {
+	case errors.Is(err, service.ErrInvalidSort):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case err != nil:
+		h.internalError(w, "list rockets failed", err)
+	default:
+		out := make([]rocketJSON, len(rockets))
+		for i, rk := range rockets {
+			out[i] = toJSON(rk)
 		}
-		// Ties always break by id ascending, so the order is stable across calls.
-		return cmp.Or(c, strings.Compare(a.ID, b.ID))
-	})
-
-	out := make([]rocketJSON, len(rockets))
-	for i, rk := range rockets {
-		out[i] = toJSON(rk)
+		writeJSON(w, http.StatusOK, out)
 	}
-	writeJSON(w, http.StatusOK, out)
 }
 
-var sortFields = map[string]func(a, b rocket.Rocket) int{
-	"id":         func(a, b rocket.Rocket) int { return strings.Compare(a.ID, b.ID) },
-	"type":       func(a, b rocket.Rocket) int { return strings.Compare(a.Type, b.Type) },
-	"speed":      func(a, b rocket.Rocket) int { return cmp.Compare(a.Speed, b.Speed) },
-	"mission":    func(a, b rocket.Rocket) int { return strings.Compare(a.Mission, b.Mission) },
-	"status":     func(a, b rocket.Rocket) int { return strings.Compare(string(a.Status), string(b.Status)) },
-	"launchedAt": func(a, b rocket.Rocket) int { return a.LaunchedAt.Compare(b.LaunchedAt) },
-	"updatedAt":  func(a, b rocket.Rocket) int { return a.UpdatedAt.Compare(b.UpdatedAt) },
+func (h *handler) debug(w http.ResponseWriter, r *http.Request) {
+	infos, err := h.svc.Debug(r.Context())
+	if err != nil {
+		h.internalError(w, "debug failed", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, infos)
 }
 
-var sortFieldNames = func() string {
-	names := make([]string, 0, len(sortFields))
-	for k := range sortFields {
-		names = append(names, k)
-	}
-	slices.Sort(names)
-	return strings.Join(names, ", ")
-}()
+// internalError logs the cause and returns a generic 500, so internal
+// details never reach the client.
+func (h *handler) internalError(w http.ResponseWriter, msg string, err error) {
+	h.log.Error(msg, "err", err)
+	writeError(w, http.StatusInternalServerError, "internal error")
+}
 
 type rocketJSON struct {
-	ID                string        `json:"id"`
-	Type              string        `json:"type"`
-	Speed             int64         `json:"speed"`
-	Mission           string        `json:"mission"`
-	Status            rocket.Status `json:"status"`
-	ExplosionReason   *string       `json:"explosionReason"`
-	LaunchedAt        time.Time     `json:"launchedAt"`
-	UpdatedAt         time.Time     `json:"updatedAt"`
-	LastMessageNumber int           `json:"lastMessageNumber"`
+	ID                string       `json:"id"`
+	Type              string       `json:"type"`
+	Speed             int64        `json:"speed"`
+	Mission           string       `json:"mission"`
+	Status            model.Status `json:"status"`
+	ExplosionReason   *string      `json:"explosionReason"`
+	LaunchedAt        time.Time    `json:"launchedAt"`
+	UpdatedAt         time.Time    `json:"updatedAt"`
+	LastMessageNumber int          `json:"lastMessageNumber"`
 }
 
-func toJSON(r rocket.Rocket) rocketJSON {
+func toJSON(r model.Rocket) rocketJSON {
 	out := rocketJSON{
 		ID: r.ID, Type: r.Type, Speed: r.Speed, Mission: r.Mission, Status: r.Status,
 		LaunchedAt: r.LaunchedAt, UpdatedAt: r.UpdatedAt, LastMessageNumber: r.LastMessageNumber,
 	}
-	if r.Status == rocket.StatusExploded {
+	if r.Status == model.StatusExploded {
 		out.ExplosionReason = &r.ExplosionReason
 	}
 	return out

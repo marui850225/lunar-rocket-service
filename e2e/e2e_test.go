@@ -97,7 +97,8 @@ func startServer(t *testing.T, bin string) string {
 	addr := ln.Addr().String()
 	ln.Close()
 
-	cmd := exec.Command(bin, "-addr", addr, "-log-level", "warn")
+	dbPath := filepath.Join(t.TempDir(), "e2e.db")
+	cmd := exec.Command(bin, "-addr", addr, "-db", dbPath, "-log-level", "warn")
 	var logs bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &logs, &logs
 	if err := cmd.Start(); err != nil {
@@ -326,9 +327,9 @@ func checkRockets(t *testing.T, url string, want map[string]expected) {
 func checkDebug(t *testing.T, url string, want map[string]expected) {
 	t.Helper()
 	var got []struct {
-		Channel      string
-		Applied      int
-		PendingCount int
+		Channel           string
+		LastMessageNumber int
+		PendingCount      int
 	}
 	getJSON(t, url+"/debug/store", &got)
 	if len(got) != len(want) {
@@ -337,8 +338,8 @@ func checkDebug(t *testing.T, url string, want map[string]expected) {
 	pending := 0
 	for _, g := range got {
 		w := want[g.Channel]
-		if g.Applied != w.LastMessageNumber || g.PendingCount != w.Pending {
-			t.Errorf("%s: applied=%d pending=%d, want %d/%d", g.Channel, g.Applied, g.PendingCount, w.LastMessageNumber, w.Pending)
+		if g.LastMessageNumber != w.LastMessageNumber || g.PendingCount != w.Pending {
+			t.Errorf("%s: lastMessageNumber=%d pending=%d, want %d/%d", g.Channel, g.LastMessageNumber, g.PendingCount, w.LastMessageNumber, w.Pending)
 		}
 		pending += g.PendingCount
 	}

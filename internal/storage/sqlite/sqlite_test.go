@@ -17,7 +17,7 @@ var ctx = context.Background()
 func open(t *testing.T) (*DB, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := Open(path)
+	db, err := Open(path, SyncNormal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestSurvivesReopen(t *testing.T) {
 	})
 	db.Close()
 
-	db2, err := Open(path)
+	db2, err := Open(path, SyncNormal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,14 +295,26 @@ func TestSurvivesReopen(t *testing.T) {
 }
 
 func TestPragmasApplied(t *testing.T) {
+	for mode, want := range map[Sync]int{SyncNormal: 1, SyncFull: 2} {
+		db, err := Open(filepath.Join(t.TempDir(), "sync.db"), mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got int
+		if err := db.writer.QueryRow(`PRAGMA synchronous`).Scan(&got); err != nil || got != want {
+			t.Errorf("%s: synchronous = %d, %v; want %d", mode, got, err, want)
+		}
+		db.Close()
+	}
+	if _, err := Open(filepath.Join(t.TempDir(), "x.db"), "sometimes"); err == nil {
+		t.Error("unknown sync mode accepted")
+	}
+
 	db, _ := open(t)
 	var mode string
-	var sync, queryOnly int
+	var queryOnly int
 	if err := db.writer.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil || mode != "wal" {
 		t.Errorf("journal_mode = %q, %v; want wal", mode, err)
-	}
-	if err := db.writer.QueryRow(`PRAGMA synchronous`).Scan(&sync); err != nil || sync != 2 {
-		t.Errorf("synchronous = %d, %v; want 2 (FULL)", sync, err)
 	}
 	if err := db.reader.QueryRow(`PRAGMA query_only`).Scan(&queryOnly); err != nil || queryOnly != 1 {
 		t.Errorf("reader query_only = %d, %v; want 1", queryOnly, err)

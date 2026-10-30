@@ -25,7 +25,7 @@ var (
 
 func newService(t testing.TB, maxPending int) (*Service, storage.Storage) {
 	t.Helper()
-	db, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"), sqlite.SyncNormal)
 	if err != nil {
 		t.Fatal(err)
 	}
