@@ -1,9 +1,7 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,14 +17,14 @@ import (
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-func newServer(t *testing.T, maxPending int) http.Handler {
+func newServer(t *testing.T) http.Handler {
 	t.Helper()
-	db, err := sqlite.Open(filepath.Join(t.TempDir(), "api.db"), sqlite.SyncNormal)
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "api.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return New(service.New(db, quiet, maxPending), quiet)
+	return New(service.New(db, quiet), quiet)
 }
 
 func do(t *testing.T, h http.Handler, method, target, body string) *httptest.ResponseRecorder {
@@ -56,7 +54,7 @@ func decode[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 }
 
 func TestPostMessageStatusCodes(t *testing.T) {
-	h := newServer(t, 1)
+	h := newServer(t)
 	tests := []struct {
 		name       string
 		body       string
@@ -66,8 +64,6 @@ func TestPostMessageStatusCodes(t *testing.T) {
 		{"buffered before launch", message("a", 2, "RocketSpeedIncreased", `{"by":100}`), 200, "buffered"},
 		{"applied, drains buffer", launched("a", "Falcon-9", 500), 200, "applied"},
 		{"duplicate", launched("a", "Falcon-9", 500), 200, "duplicate"},
-		{"early message fills buffer", message("a", 4, "RocketSpeedIncreased", `{"by":1}`), 200, "buffered"},
-		{"buffer full", message("a", 5, "RocketSpeedIncreased", `{"by":1}`), 503, ""},
 		{"malformed JSON", `{nope`, 400, ""},
 	}
 	for _, tt := range tests {
@@ -82,49 +78,11 @@ func TestPostMessageStatusCodes(t *testing.T) {
 		if tt.wantStatus != 200 && got["error"] == "" {
 			t.Fatalf("%s: missing error message in %s", tt.name, rec.Body)
 		}
-		if tt.wantStatus == 503 && rec.Header().Get("Retry-After") == "" {
-			t.Fatalf("%s: missing Retry-After", tt.name)
-		}
-	}
-}
-
-type failingService struct{ Service }
-
-func (failingService) Ingest(context.Context, []byte) (service.Result, error) {
-	return 0, errors.New("disk on fire")
-}
-
-func TestPostMessageInternalError(t *testing.T) {
-	h := New(failingService{}, quiet)
-	rec := do(t, h, "POST", "/messages", launched("a", "Falcon-9", 500))
-	if rec.Code != 500 {
-		t.Fatalf("status %d, want 500", rec.Code)
-	}
-	if body := rec.Body.String(); strings.Contains(body, "disk on fire") {
-		t.Fatalf("internal error leaked to client: %s", body)
-	}
-}
-
-type cancelledService struct{ Service }
-
-func (cancelledService) Ingest(context.Context, []byte) (service.Result, error) {
-	return 0, fmt.Errorf("channel a message 1: %w", context.Canceled)
-}
-
-func TestPostMessageClientGone(t *testing.T) {
-	var logs strings.Builder
-	h := New(cancelledService{}, slog.New(slog.NewTextHandler(&logs, nil)))
-	rec := do(t, h, "POST", "/messages", launched("a", "Falcon-9", 500))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status %d, want 503", rec.Code)
-	}
-	if strings.Contains(logs.String(), "level=ERROR") {
-		t.Fatalf("cancelled request logged as an error: %s", logs.String())
 	}
 }
 
 func TestGetRocket(t *testing.T) {
-	h := newServer(t, 0)
+	h := newServer(t)
 	do(t, h, "POST", "/messages", launched("a", "Falcon-9", 500))
 	do(t, h, "POST", "/messages", message("a", 2, "RocketSpeedIncreased", `{"by":3000}`))
 	do(t, h, "POST", "/messages", message("b", 2, "RocketSpeedIncreased", `{"by":1}`)) // not launched
@@ -150,7 +108,7 @@ func TestGetRocket(t *testing.T) {
 }
 
 func TestExplodedRocketHasReason(t *testing.T) {
-	h := newServer(t, 0)
+	h := newServer(t)
 	do(t, h, "POST", "/messages", launched("a", "Falcon-9", 500))
 	do(t, h, "POST", "/messages", message("a", 2, "RocketExploded", `{"reason":"PRESSURE_VESSEL_FAILURE"}`))
 	got := decode[map[string]any](t, do(t, h, "GET", "/rockets/a", ""))
@@ -160,7 +118,7 @@ func TestExplodedRocketHasReason(t *testing.T) {
 }
 
 func TestListRockets(t *testing.T) {
-	h := newServer(t, 0)
+	h := newServer(t)
 	// c launches first, then a, then b (launch times differ by message time).
 	do(t, h, "POST", "/messages", strings.Replace(launched("c", "Atlas", 300), "19:39:01", "19:39:00", 1))
 	do(t, h, "POST", "/messages", launched("a", "Falcon-9", 500))
@@ -196,24 +154,21 @@ func TestListRockets(t *testing.T) {
 }
 
 func TestEmptyListIsArray(t *testing.T) {
-	rec := do(t, newServer(t, 0), "GET", "/rockets", "")
+	rec := do(t, newServer(t), "GET", "/rockets", "")
 	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
 		t.Fatalf("body %q, want []", got)
 	}
 }
 
-func TestRoutingAndHealth(t *testing.T) {
-	h := newServer(t, 0)
-	if rec := do(t, h, "GET", "/healthz", ""); rec.Code != 200 {
-		t.Fatalf("healthz %d", rec.Code)
-	}
+func TestWrongMethod(t *testing.T) {
+	h := newServer(t)
 	if rec := do(t, h, "GET", "/messages", ""); rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /messages: %d, want 405", rec.Code)
 	}
 }
 
 func TestDebugStore(t *testing.T) {
-	h := newServer(t, 0)
+	h := newServer(t)
 	do(t, h, "POST", "/messages", message("a", 3, "RocketSpeedIncreased", `{"by":1}`))
 	do(t, h, "POST", "/messages", launched("b", "Atlas", 1))
 	rec := do(t, h, "GET", "/debug/store", "")

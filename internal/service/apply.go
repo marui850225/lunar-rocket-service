@@ -2,7 +2,6 @@ package service
 
 import (
 	"errors"
-	"math"
 
 	"rockets-service/internal/model"
 )
@@ -14,7 +13,6 @@ var (
 	errAlreadyLaunched = errors.New("RocketLaunched for a rocket that already launched")
 	errLaunchNotFirst  = errors.New("RocketLaunched is not message 1")
 	errAfterExplosion  = errors.New("message after RocketExploded")
-	errSpeedOverflow   = errors.New("speed change overflows int64")
 )
 
 // apply returns the state after applying m to r. Messages of one channel
@@ -47,14 +45,8 @@ func apply(r model.Rocket, m model.Message) (model.Rocket, error) {
 		r.Status = model.StatusActive
 		r.LaunchedAt = m.Time
 	case model.SpeedIncreased:
-		if r.Speed > math.MaxInt64-p.By { // decode guarantees p.By >= 0
-			return r, errSpeedOverflow
-		}
 		r.Speed += p.By
 	case model.SpeedDecreased:
-		if r.Speed < math.MinInt64+p.By {
-			return r, errSpeedOverflow
-		}
 		r.Speed -= p.By // may go negative: the messages are the source of truth
 	case model.MissionChanged:
 		r.Mission = p.NewMission

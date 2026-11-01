@@ -36,19 +36,30 @@ func (m Message) Type() MessageType {
 // message type, so a message's type and body can never disagree.
 type Payload interface{ Type() MessageType }
 
+// The JSON tags are the publisher's field names. They are also the format in
+// which buffered messages are stored.
+
 type Launched struct {
-	RocketType  string
-	LaunchSpeed int64
-	Mission     string
+	RocketType  string `json:"type"`
+	LaunchSpeed int64  `json:"launchSpeed"`
+	Mission     string `json:"mission"`
 }
 
-type SpeedIncreased struct{ By int64 }
+type SpeedIncreased struct {
+	By int64 `json:"by"`
+}
 
-type SpeedDecreased struct{ By int64 }
+type SpeedDecreased struct {
+	By int64 `json:"by"`
+}
 
-type MissionChanged struct{ NewMission string }
+type MissionChanged struct {
+	NewMission string `json:"newMission"`
+}
 
-type Exploded struct{ Reason string }
+type Exploded struct {
+	Reason string `json:"reason"`
+}
 
 func (Launched) Type() MessageType       { return TypeLaunched }
 func (SpeedIncreased) Type() MessageType { return TypeSpeedIncreased }

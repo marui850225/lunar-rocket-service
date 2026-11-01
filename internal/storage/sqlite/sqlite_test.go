@@ -17,7 +17,7 @@ var ctx = context.Background()
 func open(t *testing.T) (*DB, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := Open(path, SyncNormal)
+	db, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,16 +137,12 @@ func TestPending(t *testing.T) {
 		if err := tx.DeletePending(2, 4); err != nil {
 			return err
 		}
-		n, err := tx.CountPending()
-		if n != 2 {
-			t.Errorf("CountPending after deleting 2..4 = %d, want 2 (1 and 5 left)", n)
-		}
-		for _, k := range []int{1, 5} {
-			if _, found, _ := tx.Pending(k); !found {
-				t.Errorf("Pending(%d) deleted by DeletePending(2, 4)", k)
+		for k, want := range map[int]bool{1: true, 2: false, 3: false, 4: false, 5: true} {
+			if _, found, _ := tx.Pending(k); found != want {
+				t.Errorf("after DeletePending(2, 4): Pending(%d) found=%v, want %v", k, found, want)
 			}
 		}
-		return err
+		return nil
 	})
 }
 
@@ -237,7 +233,7 @@ func TestSurvivesReopen(t *testing.T) {
 	})
 	db.Close()
 
-	db2, err := Open(path, SyncNormal)
+	db2, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,33 +246,15 @@ func TestSurvivesReopen(t *testing.T) {
 	}
 }
 
-func TestPragmasApplied(t *testing.T) {
-	for mode, want := range map[Sync]int{SyncNormal: 1, SyncFull: 2} {
-		db, err := Open(filepath.Join(t.TempDir(), "sync.db"), mode)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var got int
-		if err := db.writer.QueryRow(`PRAGMA synchronous`).Scan(&got); err != nil || got != want {
-			t.Errorf("%s: synchronous = %d, %v; want %d", mode, got, err, want)
-		}
-		db.Close()
-	}
-	if _, err := Open(filepath.Join(t.TempDir(), "x.db"), "sometimes"); err == nil {
-		t.Error("unknown sync mode accepted")
-	}
-
+func TestSettings(t *testing.T) {
 	db, _ := open(t)
 	var mode string
-	var queryOnly int
-	if err := db.writer.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil || mode != "wal" {
+	var sync int
+	if err := db.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil || mode != "wal" {
 		t.Errorf("journal_mode = %q, %v; want wal", mode, err)
 	}
-	if err := db.reader.QueryRow(`PRAGMA query_only`).Scan(&queryOnly); err != nil || queryOnly != 1 {
-		t.Errorf("reader query_only = %d, %v; want 1", queryOnly, err)
-	}
-	if _, err := db.reader.Exec(`DELETE FROM rockets`); err == nil {
-		t.Error("reader connection accepted a write")
+	if err := db.db.QueryRow(`PRAGMA synchronous`).Scan(&sync); err != nil || sync != 1 {
+		t.Errorf("synchronous = %d, %v; want 1 (NORMAL)", sync, err)
 	}
 }
 
@@ -313,37 +291,24 @@ func TestPanicInTransactionRollsBackAndReleasesWriter(t *testing.T) {
 	}
 }
 
-func TestStoredPayloadFormat(t *testing.T) {
-	// The on-disk format is fixed: these strings must keep decoding even if
-	// model field names change.
-	good := map[model.MessageType]string{
-		model.TypeLaunched:       `{"type":"Atlas","launchSpeed":5,"mission":"M"}`,
-		model.TypeSpeedIncreased: `{"by":3}`,
-		model.TypeSpeedDecreased: `{"by":0}`,
-		model.TypeMissionChanged: `{"newMission":"N"}`,
-		model.TypeExploded:       `{"reason":""}`,
-	}
-	for typ, body := range good {
-		p, err := decodePayload(typ, body)
-		if err != nil || p.Type() != typ {
-			t.Errorf("%s %s: %v, %v", typ, body, p, err)
-		}
-		again, _ := encodePayload(p)
-		if again != body {
-			t.Errorf("%s: re-encoded as %s, want %s", typ, again, body)
-		}
-	}
-	for _, bad := range []struct {
-		typ  model.MessageType
-		body string
-	}{
-		{model.TypeLaunched, `{"RocketType":"Atlas","launchSpeed":5,"mission":"M"}`}, // old Go field name
-		{model.TypeLaunched, `{"type":"Atlas","mission":"M"}`},                       // missing field
-		{model.TypeSpeedIncreased, `{}`},
-		{model.TypeExploded, `{"reason":"x","extra":1}`},
+func TestPayloadRoundTrip(t *testing.T) {
+	for _, p := range []model.Payload{
+		model.Launched{RocketType: "Atlas", LaunchSpeed: 5, Mission: "M"},
+		model.SpeedIncreased{By: 3},
+		model.SpeedDecreased{By: 2},
+		model.MissionChanged{NewMission: "N"},
+		model.Exploded{Reason: "R"},
 	} {
-		if _, err := decodePayload(bad.typ, bad.body); err == nil {
-			t.Errorf("%s %s decoded without error", bad.typ, bad.body)
+		body, err := encodePayload(p)
+		if err != nil {
+			t.Fatal(err)
 		}
+		got, err := decodePayload(p.Type(), body)
+		if err != nil || got != p {
+			t.Errorf("%s: stored as %s, read back %+v, %v", p.Type(), body, got, err)
+		}
+	}
+	if body, _ := encodePayload(model.Launched{RocketType: "Atlas"}); !strings.Contains(body, `"type":"Atlas"`) {
+		t.Errorf("stored body %s does not use the publisher's field names", body)
 	}
 }

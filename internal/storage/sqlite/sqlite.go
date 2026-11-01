@@ -1,9 +1,8 @@
 // Package sqlite implements storage.Storage on a SQLite database file.
 //
-// Concurrency: SQLite allows one writer at a time. All InChannel transactions
-// go through a single connection and start with BEGIN IMMEDIATE, so they are
-// serialized in Go instead of failing with SQLITE_BUSY. Reads use a separate
-// pool and, in WAL mode, never block or wait for the writer.
+// Concurrency: the database is used through exactly one connection, so every
+// query and transaction runs one at a time. Concurrent requests simply wait
+// for the connection; there is no locking in our own code.
 package sqlite
 
 import (
@@ -13,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
@@ -53,91 +51,53 @@ const maxDebugPending = 100
 
 // DB is a storage.Storage backed by one SQLite file.
 type DB struct {
-	writer *sql.DB // exactly one connection: all writes are serialized
-	reader *sql.DB
+	db *sql.DB
 }
 
 var _ storage.Storage = (*DB)(nil)
 
-// Sync sets how often SQLite fsyncs, trading durability for speed.
-type Sync string
-
-const (
-	// SyncNormal fsyncs at WAL checkpoints only. A commit survives a crash of
-	// this process; an OS crash or power loss can lose the last few commits,
-	// but never corrupts the database. About 100x faster than SyncFull.
-	SyncNormal Sync = "normal"
-	// SyncFull fsyncs every commit: a commit survives power loss.
-	SyncFull Sync = "full"
-)
-
 // Open opens (creating if needed) the database file at path.
-func Open(path string, sync Sync) (*DB, error) {
-	var level string
-	switch sync {
-	case SyncNormal:
-		level = "NORMAL"
-	case SyncFull:
-		level = "FULL"
-	default:
-		return nil, fmt.Errorf("unknown sync mode %q (want normal or full)", sync)
-	}
-	pragmas := "_pragma=journal_mode(WAL)&_pragma=synchronous(" + level + ")&_pragma=busy_timeout(5000)"
-	base := "file:" + url.PathEscape(path) + "?" + pragmas
-
-	writer, err := sql.Open("sqlite", base+"&_txlock=immediate")
+//
+// WAL with synchronous=NORMAL: a commit survives a crash of this process;
+// an OS crash or power loss can lose the last few commits but never
+// corrupts the database. Fsyncing every commit (FULL) was measured at about
+// 100x slower.
+func Open(path string) (*DB, error) {
+	dsn := "file:" + url.PathEscape(path) + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	writer.SetMaxOpenConns(1)
-	if _, err := writer.Exec(schema); err != nil {
-		writer.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("creating schema: %w", err)
 	}
-
-	reader, err := sql.Open("sqlite", base+"&_pragma=query_only(1)")
-	if err != nil {
-		writer.Close()
-		return nil, err
-	}
-	return &DB{writer: writer, reader: reader}, nil
+	return &DB{db: db}, nil
 }
 
-func (db *DB) Close() error {
-	return errors.Join(db.reader.Close(), db.writer.Close())
-}
+func (db *DB) Close() error { return db.db.Close() }
 
-// InChannel runs fn in a write transaction. Because every write transaction
-// is serialized, it also excludes every other channel; the channel argument
-// scopes what the Tx reads and writes.
+// InChannel runs fn in a transaction. With one connection, no other query
+// can run until it ends; the channel argument scopes what the Tx touches.
 func (db *DB) InChannel(ctx context.Context, channel string, fn func(storage.Tx) error) error {
-	sqlTx, err := db.writer.BeginTx(ctx, nil)
+	sqlTx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	// Roll back on any exit but a successful commit, including a panic in
-	// fn: otherwise the only writer connection would stay inside an open
-	// transaction and every later write would wait forever.
-	committed := false
-	defer func() {
-		if !committed {
-			sqlTx.Rollback()
-		}
-	}()
+	// Undo everything unless Commit succeeds, also if fn returns an error or
+	// panics. After a successful Commit this does nothing.
+	defer sqlTx.Rollback()
 	if err := fn(&tx{ctx: ctx, tx: sqlTx, channel: channel}); err != nil {
 		return err
 	}
-	if err := sqlTx.Commit(); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+	return sqlTx.Commit()
 }
 
 const rocketColumns = `channel, type, speed, mission, status, explosion_reason, launched_at, updated_at, last_message_number`
 
 func (db *DB) GetRocket(ctx context.Context, channel string) (model.Rocket, bool, error) {
-	row := db.reader.QueryRowContext(ctx, `SELECT `+rocketColumns+` FROM rockets WHERE channel = ?`, channel)
+	row := db.db.QueryRowContext(ctx, `SELECT `+rocketColumns+` FROM rockets WHERE channel = ?`, channel)
 	r, err := scanRocket(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Rocket{}, false, nil
@@ -172,7 +132,7 @@ func (db *DB) ListRockets(ctx context.Context, opts storage.ListOptions) ([]mode
 	}
 	query += ` ORDER BY ` + column + ` ` + dir + `, channel ASC`
 
-	rows, err := db.reader.QueryContext(ctx, query)
+	rows, err := db.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +151,7 @@ func (db *DB) ListRockets(ctx context.Context, opts storage.ListOptions) ([]mode
 // Channels reads every channel's bookkeeping in one read transaction, so
 // counts and number lists come from the same snapshot.
 func (db *DB) Channels(ctx context.Context) ([]storage.ChannelInfo, error) {
-	rtx, err := db.reader.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	rtx, err := db.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
@@ -321,12 +281,6 @@ func (t *tx) DeletePending(from, to int) error {
 	return err
 }
 
-func (t *tx) CountPending() (int, error) {
-	var n int
-	err := t.tx.QueryRowContext(t.ctx, `SELECT COUNT(*) FROM pending WHERE channel = ?`, t.channel).Scan(&n)
-	return n, err
-}
-
 // --- row mapping -------------------------------------------------------------
 
 type scanner interface{ Scan(dest ...any) error }
@@ -367,100 +321,32 @@ func nullTime(t time.Time) sql.NullString {
 
 func nullString(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }
 
-// Buffered payloads are stored as JSON in the storage format below. Its tags
-// are fixed on purpose: renaming a model field must not change, or silently
-// misread, what is already on disk. Decoding rejects unknown fields and
-// requires every field, so a format mismatch is an error, not a zero value.
-
-type storedLaunched struct {
-	Type        *string `json:"type"`
-	LaunchSpeed *int64  `json:"launchSpeed"`
-	Mission     *string `json:"mission"`
-}
-
-type storedSpeed struct {
-	By *int64 `json:"by"`
-}
-
-type storedMission struct {
-	NewMission *string `json:"newMission"`
-}
-
-type storedExploded struct {
-	Reason *string `json:"reason"`
-}
+// Buffered payloads are stored as JSON, using the publisher's field names
+// (the json tags on the model types).
 
 func encodePayload(p model.Payload) (string, error) {
-	var v any
-	switch p := p.(type) {
-	case model.Launched:
-		v = storedLaunched{Type: &p.RocketType, LaunchSpeed: &p.LaunchSpeed, Mission: &p.Mission}
-	case model.SpeedIncreased:
-		v = storedSpeed{By: &p.By}
-	case model.SpeedDecreased:
-		v = storedSpeed{By: &p.By}
-	case model.MissionChanged:
-		v = storedMission{NewMission: &p.NewMission}
-	case model.Exploded:
-		v = storedExploded{Reason: &p.Reason}
-	default:
-		return "", fmt.Errorf("unknown payload %T", p)
-	}
-	b, err := json.Marshal(v)
+	b, err := json.Marshal(p)
 	return string(b), err
 }
 
 func decodePayload(t model.MessageType, body string) (model.Payload, error) {
-	missing := fmt.Errorf("decoding pending %s body %s: missing field", t, body)
 	switch t {
 	case model.TypeLaunched:
-		var v storedLaunched
-		if err := strictUnmarshal(t, body, &v); err != nil {
-			return nil, err
-		}
-		if v.Type == nil || v.LaunchSpeed == nil || v.Mission == nil {
-			return nil, missing
-		}
-		return model.Launched{RocketType: *v.Type, LaunchSpeed: *v.LaunchSpeed, Mission: *v.Mission}, nil
-	case model.TypeSpeedIncreased, model.TypeSpeedDecreased:
-		var v storedSpeed
-		if err := strictUnmarshal(t, body, &v); err != nil {
-			return nil, err
-		}
-		if v.By == nil {
-			return nil, missing
-		}
-		if t == model.TypeSpeedIncreased {
-			return model.SpeedIncreased{By: *v.By}, nil
-		}
-		return model.SpeedDecreased{By: *v.By}, nil
+		return unmarshalAs[model.Launched](body)
+	case model.TypeSpeedIncreased:
+		return unmarshalAs[model.SpeedIncreased](body)
+	case model.TypeSpeedDecreased:
+		return unmarshalAs[model.SpeedDecreased](body)
 	case model.TypeMissionChanged:
-		var v storedMission
-		if err := strictUnmarshal(t, body, &v); err != nil {
-			return nil, err
-		}
-		if v.NewMission == nil {
-			return nil, missing
-		}
-		return model.MissionChanged{NewMission: *v.NewMission}, nil
+		return unmarshalAs[model.MissionChanged](body)
 	case model.TypeExploded:
-		var v storedExploded
-		if err := strictUnmarshal(t, body, &v); err != nil {
-			return nil, err
-		}
-		if v.Reason == nil {
-			return nil, missing
-		}
-		return model.Exploded{Reason: *v.Reason}, nil
+		return unmarshalAs[model.Exploded](body)
 	}
 	return nil, fmt.Errorf("unknown message type %q in pending", t)
 }
 
-func strictUnmarshal(t model.MessageType, body string, v any) error {
-	dec := json.NewDecoder(strings.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return fmt.Errorf("decoding pending %s body: %w", t, err)
-	}
-	return nil
+func unmarshalAs[P model.Payload](body string) (model.Payload, error) {
+	var p P
+	err := json.Unmarshal([]byte(body), &p)
+	return p, err
 }

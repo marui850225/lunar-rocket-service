@@ -9,34 +9,21 @@ import (
 )
 
 // Result says what Ingest did with an accepted message.
-type Result int
+type Result string
 
 const (
-	Applied   Result = iota // applied now, possibly with buffered successors
-	Buffered                // stored until the gap before it fills
-	Duplicate               // already processed or already buffered; ignored
+	Applied   Result = "applied"   // applied now, possibly with buffered successors
+	Buffered  Result = "buffered"  // stored until the gap before it fills
+	Duplicate Result = "duplicate" // already processed or already buffered; ignored
 )
 
-func (r Result) String() string {
-	switch r {
-	case Applied:
-		return "applied"
-	case Buffered:
-		return "buffered"
-	case Duplicate:
-		return "duplicate"
-	}
-	return "unknown"
-}
-
 // Ingest decodes, validates and processes one raw message. Errors wrap
-// ErrInvalid (bad input) or ErrBufferFull (redeliver later); anything else
-// is an internal failure. When Ingest returns without error, the outcome is
-// committed to storage.
+// ErrInvalid for bad input; anything else is an internal failure. When
+// Ingest returns without error, the outcome is committed to storage.
 func (s *Service) Ingest(ctx context.Context, body []byte) (Result, error) {
 	m, err := decode(body)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 	return s.ingest(ctx, m)
 }
@@ -68,15 +55,6 @@ func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 			if !added {
 				res = Duplicate
 				return nil
-			}
-			// Checked after adding so a duplicate is never refused as "full".
-			// Returning the error rolls the insert back.
-			n, err := tx.CountPending()
-			if err != nil {
-				return err
-			}
-			if n > s.maxPending {
-				return ErrBufferFull
 			}
 			res = Buffered
 			return nil
@@ -110,18 +88,15 @@ func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 		return nil
 	})
 	if err != nil {
-		return 0, fmt.Errorf("channel %s message %d: %w", m.Channel, m.Number, err)
+		return "", fmt.Errorf("channel %s message %d: %w", m.Channel, m.Number, err)
 	}
-	s.log.Debug("message ingested", "channel", m.Channel, "number", m.Number, "type", m.Type(), "result", res)
 	return res, nil
 }
 
-func (s *Service) applyAndLog(before model.Rocket, m model.Message) model.Rocket {
-	after, err := apply(before, m)
+func (s *Service) applyAndLog(r model.Rocket, m model.Message) model.Rocket {
+	r, err := apply(r, m)
 	if err != nil {
 		s.log.Warn("message skipped", "channel", m.Channel, "number", m.Number, "type", m.Type(), "reason", err)
-	} else if after.Speed < 0 && before.Speed >= 0 {
-		s.log.Warn("speed went negative", "channel", m.Channel, "number", m.Number, "speed", after.Speed)
 	}
-	return after
+	return r
 }

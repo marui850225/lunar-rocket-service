@@ -43,7 +43,6 @@ type Tx interface {
 	Pending(number int) (m model.Message, found bool, err error)
 	// DeletePending removes buffered messages numbered from..to, inclusive.
 	DeletePending(from, to int) error
-	CountPending() (int, error)
 }
 
 // SortField names a rocket field to order a list by.

@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,14 +23,14 @@ var (
 	t0    = time.Date(2022, 2, 2, 19, 39, 5, 0, time.UTC)
 )
 
-func newService(t testing.TB, maxPending int) (*Service, storage.Storage) {
+func newService(t testing.TB) (*Service, storage.Storage) {
 	t.Helper()
-	db, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"), sqlite.SyncNormal)
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return New(db, quiet, maxPending), db
+	return New(db, quiet), db
 }
 
 func mk(channel string, n int, p model.Payload) model.Message {
@@ -72,7 +71,7 @@ func bookkeeping(t testing.TB, db storage.Storage, channel string) (last int, pe
 
 func TestIngestOrderingExample(t *testing.T) {
 	// Arrivals 1, 7, 5, 4, 3, 2: message 2 applies 2..5, and 7 waits for 6.
-	s, db := newService(t, 0)
+	s, db := newService(t)
 	steps := []struct {
 		msg         model.Message
 		want        Result
@@ -105,7 +104,7 @@ func TestIngestOrderingExample(t *testing.T) {
 }
 
 func TestDuplicateOfPendingKeepsFirstCopy(t *testing.T) {
-	s, _ := newService(t, 0)
+	s, _ := newService(t)
 	mustIngest(t, s, up("a", 2, 100))
 	if got := mustIngest(t, s, up("a", 2, 999)); got != Duplicate {
 		t.Fatalf("result %v, want Duplicate", got)
@@ -117,7 +116,7 @@ func TestDuplicateOfPendingKeepsFirstCopy(t *testing.T) {
 }
 
 func TestHiddenUntilLaunched(t *testing.T) {
-	s, _ := newService(t, 0)
+	s, _ := newService(t)
 	mustIngest(t, s, up("a", 2, 100))
 	if _, err := s.GetRocket(ctx, "a"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetRocket before launch: %v, want ErrNotFound", err)
@@ -135,36 +134,8 @@ func TestHiddenUntilLaunched(t *testing.T) {
 	}
 }
 
-func TestBufferFull(t *testing.T) {
-	s, db := newService(t, 2)
-	mustIngest(t, s, up("a", 3, 1))
-	mustIngest(t, s, up("a", 4, 1))
-
-	_, err := s.ingest(ctx, up("a", 5, 1))
-	if !errors.Is(err, ErrBufferFull) {
-		t.Fatalf("err = %v, want ErrBufferFull", err)
-	}
-	if !strings.Contains(err.Error(), "channel a message 5") {
-		t.Fatalf("error %q does not say which message", err)
-	}
-	if _, pending := bookkeeping(t, db, "a"); fmt.Sprint(pending) != "[3 4]" {
-		t.Fatalf("rejected message was kept: pending %v", pending)
-	}
-	// A duplicate of a buffered message is still a duplicate when full.
-	if got := mustIngest(t, s, up("a", 3, 1)); got != Duplicate {
-		t.Fatalf("result %v, want Duplicate", got)
-	}
-	// The next message is accepted even when full, and drains the buffer.
-	mustIngest(t, s, launch("a"))
-	mustIngest(t, s, up("a", 2, 1))
-	mustIngest(t, s, up("a", 5, 1)) // the rejected message, redelivered
-	if r, _ := s.GetRocket(ctx, "a"); r.LastMessageNumber != 5 || r.Speed != 504 {
-		t.Fatalf("state %+v", r)
-	}
-}
-
 func TestIngestRejectsInvalid(t *testing.T) {
-	s, db := newService(t, 0)
+	s, db := newService(t)
 	if _, err := s.Ingest(ctx, []byte(`{nope`)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid", err)
 	}
@@ -228,7 +199,7 @@ func sameRocket(a, b model.Rocket) bool {
 }
 
 func BenchmarkIngestInOrder(b *testing.B) {
-	s, _ := newService(b, 0)
+	s, _ := newService(b)
 	mustIngest(b, s, launch("a"))
 	b.ResetTimer()
 	for i := range b.N {
@@ -241,7 +212,7 @@ func TestAnyOrderGivesSameResult(t *testing.T) {
 	if testing.Short() {
 		seeds = 20
 	}
-	s, _ := newService(t, 0)
+	s, _ := newService(t)
 	for seed := range seeds {
 		rng := rand.New(rand.NewPCG(seed, 0))
 		ch := fmt.Sprintf("seed-%d", seed) // one channel per seed, one shared database
@@ -280,7 +251,7 @@ func TestConcurrentIngest(t *testing.T) {
 	}
 	all = mess(rng, all)
 
-	s, _ := newService(t, 0)
+	s, _ := newService(t)
 	work := make(chan model.Message)
 	var wg sync.WaitGroup
 	for range workers {
@@ -330,7 +301,7 @@ func TestConcurrentIngest(t *testing.T) {
 // at 1001 while in-order messages keep arriving. Each in-order ingest must
 // not read the buffered messages it cannot apply.
 func BenchmarkIngestWithLargeBufferBehindGap(b *testing.B) {
-	s, _ := newService(b, 0)
+	s, _ := newService(b)
 	mustIngest(b, s, launch("a"))
 	for n := 1002; n <= 10001; n++ {
 		mustIngest(b, s, up("a", n, 1))

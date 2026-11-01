@@ -2,7 +2,6 @@ package service
 
 import (
 	"errors"
-	"math"
 	"rockets-service/internal/model"
 	"testing"
 	"time"
@@ -80,21 +79,6 @@ func TestApply(t *testing.T) {
 			messages: []model.Message{msg(1, model.SpeedIncreased{By: 100}), launchN(2)},
 			want:     model.Rocket{ID: "ch-1", UpdatedAt: t0.Add(2 * time.Second), LastMessageNumber: 2},
 			wantErr:  errLaunchNotFirst,
-		},
-		{
-			name:     "speed increase that would overflow is skipped",
-			messages: []model.Message{launchN(1), msg(2, model.SpeedIncreased{By: math.MaxInt64})},
-			want: model.Rocket{ID: "ch-1", Type: "Falcon-9", Speed: 500, Mission: "ARTEMIS", Status: model.StatusActive,
-				LaunchedAt: t0.Add(1 * time.Second), UpdatedAt: t0.Add(2 * time.Second), LastMessageNumber: 2},
-			wantErr: errSpeedOverflow,
-		},
-		{
-			name: "speed decrease that would overflow is skipped",
-			messages: []model.Message{launchN(1), msg(2, model.SpeedDecreased{By: math.MaxInt64}),
-				msg(3, model.SpeedDecreased{By: math.MaxInt64})},
-			want: model.Rocket{ID: "ch-1", Type: "Falcon-9", Speed: 500 - math.MaxInt64, Mission: "ARTEMIS", Status: model.StatusActive,
-				LaunchedAt: t0.Add(1 * time.Second), UpdatedAt: t0.Add(3 * time.Second), LastMessageNumber: 3},
-			wantErr: errSpeedOverflow,
 		},
 	}
 

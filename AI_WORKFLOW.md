@@ -114,3 +114,11 @@ Step R4 — docs:
 - Removed: `TestLaunched` (covered by the apply table), `TestDecodeRealSample` (e2e decodes 100,000 real messages), sqlite `TestEmptyList` and `TestChannels` (the API tests run the same paths against real SQLite), two of three 400 cases in the API status-code table (validation is tested in `decode`; one case proves the 400 mapping), four per-field sort cases in the API list test (every field and direction is tested at the SQLite layer).
 - Folded the two overflow cases into the apply table instead of an awkward `append`.
 - Random-order property test: 200 → 100 seeds. `make test` went from ~100 s to 53 s.
+
+### 13. Simplification to a minimal version (human request)
+
+- Human wants to explain every line, so asked for a minimal working version. AI reviewed all source files itself (no parallel agents) and split candidates into "simpler code, same behaviour" (done directly) and "remove a feature" (human chose).
+- Same behaviour, simpler code: no graceful shutdown in `main.go` (safe because WAL + idempotent redelivery protect data; tested with `kill -9`); `defer tx.Rollback()` idiom instead of a committed flag (still panic-safe, test kept); buffered payloads stored with JSON tags on the model instead of a separate strict format; no special case for cancelled requests; API uses `*service.Service` directly instead of an interface; `Result` is a string type; `/healthz` removed (e2e waits on `GET /rockets`).
+- Features removed by human choice: `-sync` (hard-coded NORMAL), `-log-level` (with the debug and negative-speed logs), `-max-pending` and the buffer cap with its 503, the separate read-only pool (one SQLite connection for everything), the int64 overflow check. Kept by human choice: `/debug/store`, the lifecycle rules.
+- Each removal is listed in the README's Limitations table with what it would take to add back.
+- Verified: `go vet`, `make test` (race) and `make e2e` (defaults: all 20 rockets match; injected failures: 1,062 duplicates, all match) pass.

@@ -34,9 +34,6 @@ Without `make`: `go run ./cmd/server`. Flags:
 |---|---|---|
 | `-addr` | `:8088` | HTTP listen address |
 | `-db` | `rockets.db` | SQLite file, created if missing. Delete it to start from scratch |
-| `-sync` | `normal` | `normal`: a reply survives a crash of the server process. `full`: it also survives power loss, about 100× slower (see [Durability](#durability)) |
-| `-max-pending` | `10000` | Early messages buffered per rocket before replying 503 |
-| `-log-level` | `info` | `debug` logs every message |
 
 ## Testing
 
@@ -51,10 +48,10 @@ Without `make`: `go run ./cmd/server`. Flags:
 | Layer | Where | Proves |
 |---|---|---|
 | Rule tests | `internal/service` | Each message type and each edge-case rule; decoding and validation of every field |
-| Storage tests | `internal/storage/sqlite` | Round trip including NULLs and time zones, buffer dedup and order, rollback on error, every sort field and direction, data survives reopening, SQLite settings really applied |
+| Storage tests | `internal/storage/sqlite` | Round trip including NULLs and time zones, buffer dedup and order, rollback on error and on panic, every sort field and direction, data survives reopening, SQLite settings applied |
 | Ordering property test | `internal/service` | 100 seeded random orderings of a 100-message stream, each message delivered 1 to 3 times, all reach the same state as a naive in-order fold |
 | Concurrency test | `internal/service` | 16 writers and 2 readers over 8 rockets under `-race`; final state still matches |
-| HTTP tests | `internal/api` | Every status code, JSON shape, 404s, every sort field and order |
+| HTTP tests | `internal/api` | Status codes, JSON shape, 404s, sorting defaults and validation |
 | End to end | `e2e/` | **Defaults:** 100,000 messages in about a minute; all 20 rockets match field by field. **Injected failures:** 10% of requests fail (half dropped, half with the reply lost), producing about 1,000 real duplicates and many gaps; state and buffers still match |
 
 The tests were also checked to fail when the code is broken on purpose: skipping the duplicate check, applying buffered messages across a gap, or not deleting applied messages from `pending` each make the service tests fail, and removing deduplication makes the e2e failure scenario fail. The server was also killed with `kill -9` mid-run and restarted on the same database; the whole test program was then replayed from message 1 (about 34,000 duplicates followed by new messages). The final state matched an uninterrupted run exactly: 20 rockets, 6 exploded, 0 differences, nothing left pending. See `AI_WORKFLOW.md`.
@@ -71,7 +68,6 @@ Ingests one message in the format from the challenge README. The reply is sent o
 | `200 {"result":"buffered"}` | Arrived early; held until the gap before it fills | Moves on |
 | `200 {"result":"duplicate"}` | Already processed or already buffered; ignored | Moves on |
 | `400 {"error":"..."}` | Malformed JSON, unknown `messageType`, missing or invalid field | Redelivery cannot help |
-| `503` + `Retry-After: 1` | This rocket's buffer of early messages is full | Redelivers later (backpressure) |
 | `500` | Unexpected internal error | Redelivers |
 
 ### `GET /rockets/{channel}`
@@ -100,14 +96,10 @@ Lists all launched rockets. `sort` is one of `id`, `type`, `speed`, `mission`, `
 
 A read-only view of the bookkeeping: per channel, `lastMessageNumber`, the number of buffered messages, and the lowest 100 buffered message numbers. It includes channels that have not launched. In production this would sit behind auth or on an admin port.
 
-### `GET /healthz`
-
-Returns `200 ok`.
-
 ## Design
 
 ```
-cmd/server                 wiring: flags, HTTP server, graceful shutdown
+cmd/server                 wiring: flags, open the database, start the HTTP server
 internal/api               HTTP only: read request → call service → status code and JSON
 internal/service           business logic: decode and validate, apply rules, ordering/buffer, get, list
 internal/storage           storage interface (no SQL, no rules) + ListOptions, SortField, ChannelInfo
@@ -145,7 +137,7 @@ CREATE TABLE pending (                    -- messages that arrived early
 
 Times are stored in UTC with fixed-width nanoseconds so that SQL `ORDER BY` on the text matches time order. Mixed offsets or trimmed nanoseconds would sort wrongly as text.
 
-Buffered message bodies are stored in a fixed JSON format with explicit field names, independent of the Go type names. Reading a row that does not match the format exactly (unknown or missing field) is an error, never a silent zero value.
+Buffered message bodies are stored as JSON with the publisher's field names (`type`, `launchSpeed`, `by`, …), fixed by JSON tags on the model types.
 
 ### Ordering and deduplication
 
@@ -154,7 +146,7 @@ Each message is processed in **one transaction**, and the loop that applies buff
 | Arriving message `n` | Action |
 |---|---|
 | `n <= last_message_number` | Duplicate, ignored |
-| `n > last_message_number + 1` | Inserted into `pending`. Already there: duplicate. Buffer over the cap: rolled back, `503` |
+| `n > last_message_number + 1` | Inserted into `pending`. Already there: duplicate |
 | `n == last_message_number + 1` | Applied, then the contiguous run that follows it in `pending`; the applied rows are deleted and the rocket row is saved |
 
 Example, arrivals `1, 7, 5, 4, 3, 2`:
@@ -166,30 +158,17 @@ Example, arrivals `1, 7, 5, 4, 3, 2`:
 2       → apply 2, 3, 4, 5; 6 is missing   last_message_number=5  pending=[7]
 ```
 
-Message numbers are dense, so `n <= last_message_number` identifies every processed duplicate and no message history is kept. The duplicate check runs before the buffer cap, so a redelivered buffered message is never refused as full, and the next message never enters the buffer, so a full buffer can always drain.
+Message numbers are dense, so `n <= last_message_number` identifies every processed duplicate and no message history is kept. Buffered successors are read one at a time and the loop stops at the first gap, so messages waiting behind a gap are never read; one range `DELETE` removes the applied run.
 
 **Why buffer instead of rejecting early messages?** Rejecting with non-2xx would push ordering onto the sender's retry loop: a flat 500 ms delay, observed from the binary. Worse, the binary **drops retries still pending when it finishes**, so a rejection near the end loses the message for good.
 
-### Concurrency
+### Concurrency and durability
 
-SQLite allows one writer at a time, so the service holds no locks of its own:
+The database is used through **one connection**, so every query and transaction runs one at a time and our own code needs no locks. Concurrent requests simply wait for the connection. A transaction that returns an error or panics is rolled back, so the rocket row and `pending` never disagree.
 
-- **Writes** go through a single connection and start with `BEGIN IMMEDIATE`. Concurrent requests queue in Go instead of failing with `SQLITE_BUSY`, and each transaction reads, decides and commits atomically.
-- **Reads** use a separate read-only pool. In WAL mode they see the last committed state and never wait for the writer.
-- **Atomicity:** any error or panic, including "buffer full", rolls the whole transaction back, so the rocket row and `pending` never disagree and the writer connection is always released.
-- **Draining:** buffered successors are read one at a time and the loop stops at the first gap, so messages waiting behind a gap are never read. One range `DELETE` removes the applied run.
-- **Shutdown:** on SIGINT/SIGTERM the server stops accepting requests and waits for running ones (up to 10 s, then cancels them) before closing the database.
+The reply is sent only after commit. SQLite runs in WAL mode with `synchronous=NORMAL`: a committed message survives a crash or `kill -9` of the server (tested), and an OS crash or power loss can lose the last few commits but never corrupts the database. Forcing every commit to disk (`synchronous=FULL`) was measured at 6.4 ms instead of 0.065 ms per message, which would turn the graders' one-minute run into about 11 minutes.
 
-### Durability
-
-The reply is sent after commit. How durable a commit is depends on `-sync`, measured on an NVMe SSD:
-
-| `-sync` | Per message | 100,000-message default run | A `200` survives |
-|---|---|---|---|
-| `normal` (default) | 0.065 ms | about 53 s | a crash or `kill -9` of the server (tested) |
-| `full` | 6.4 ms | about 11 min | also an OS crash or power loss |
-
-With `normal`, an OS crash or power loss can lose the last few commits; the database is never corrupted. `normal` is the default so that the graders' default run stays fast. Strict durability without the slowdown would need several requests per fsync (group commit), which Postgres does.
+On Ctrl-C the process stops immediately. That is safe: committed messages are on disk, and a request cut off before commit is rolled back and redelivered by the sender.
 
 ### Listing
 
@@ -201,12 +180,11 @@ There is one rule for anything that does not fit the lifecycle: **skip it, log a
 
 | Case | Behaviour |
 |---|---|
-| Speed goes below 0 | Applied as given, with a warning. The messages are the source of truth |
+| Speed goes below 0 | Applied as given. The messages are the source of truth |
 | Message after `RocketExploded` | State stays frozen |
 | `RocketLaunched` that is not message 1, or message 1 that is not `RocketLaunched` | Skipped; in the second case the rocket never becomes visible |
 | Same `(channel, messageNumber)` with a different body | The first copy wins; bodies are not compared |
 | Negative `by` | Rejected with `400` |
-| Speed change that would overflow `int64` | Skipped and logged; the speed keeps its last valid value |
 
 ### What the test program actually does
 
@@ -216,9 +194,11 @@ Measured by running the binary against a logging stub before designing anything.
 
 | Limitation | Impact | Next step |
 |---|---|---|
-| One SQLite writer | Writes for all rockets are serialized; not a bottleneck at this load with `-sync normal` | Postgres with `SELECT … FOR UPDATE` per rocket row, or partition channels across instances |
-| Durability depends on `-sync` | `normal` can lose the last few commits on power loss | `-sync full`, or Postgres with group commit |
+| One SQLite connection | All reads and writes are serialized; not a bottleneck at this load | Postgres with `SELECT … FOR UPDATE` per rocket row, or partition channels across instances |
+| `synchronous=NORMAL` | The last few commits can be lost on power loss | `synchronous=FULL` (about 100× slower), or Postgres with group commit |
+| No limit on buffered messages | A gap that never fills keeps every later message of that rocket in `pending` | A per-rocket cap that replies 503, or a gap timeout |
+| No graceful shutdown | Requests in flight on Ctrl-C are cut off and redelivered | Catch SIGTERM and drain requests before closing the database |
 | Single instance | No horizontal scaling | Partition by channel (consistent hashing, or Kafka keyed by channel) so each rocket has one owner |
-| A permanently lost message blocks its rocket | State stops at the gap; once the buffer cap is reached, further early messages get 503 | A gap-repair request to the sender, or a gap timeout with an explicit `STALE` status |
+| A permanently lost message blocks its rocket | State stops at the gap | A gap-repair request to the sender, or a gap timeout with an explicit `STALE` status |
 | Conflicting duplicates are not detected | A resend with a different body is silently ignored | Store a body hash per message |
 | No pagination, filtering, metrics or auth | Fine for 20 rockets and a local demo | `LIMIT` + cursor, `?status=` filter, Prometheus counters, auth middleware |

@@ -98,7 +98,7 @@ func startServer(t *testing.T, bin string) string {
 	ln.Close()
 
 	dbPath := filepath.Join(t.TempDir(), "e2e.db")
-	cmd := exec.Command(bin, "-addr", addr, "-db", dbPath, "-log-level", "warn")
+	cmd := exec.Command(bin, "-addr", addr, "-db", dbPath)
 	var logs bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &logs, &logs
 	if err := cmd.Start(); err != nil {
@@ -114,7 +114,7 @@ func startServer(t *testing.T, bin string) string {
 
 	url := "http://" + addr
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		if resp, err := http.Get(url + "/healthz"); err == nil {
+		if resp, err := http.Get(url + "/rockets"); err == nil {
 			resp.Body.Close()
 			return url
 		}
