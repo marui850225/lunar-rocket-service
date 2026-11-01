@@ -80,7 +80,7 @@ func (db *DB) Close() error { return db.db.Close() }
 
 // InTx runs fn in a transaction. With one connection, no other query can run
 // until it ends.
-func (db *DB) InTx(ctx context.Context, fn func(storage.RocketTable, storage.PendingTable) error) error {
+func (db *DB) InTx(ctx context.Context, fn func(storage.Tables) error) error {
 	sqlTx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -89,7 +89,7 @@ func (db *DB) InTx(ctx context.Context, fn func(storage.RocketTable, storage.Pen
 	// panics. After a successful Commit this does nothing.
 	defer sqlTx.Rollback()
 	in := scope{ctx: ctx, tx: sqlTx}
-	if err := fn(rocketTable{in}, pendingTable{in}); err != nil {
+	if err := fn(storage.Tables{Rockets: rocketTable{in}, Pending: pendingTable{in}}); err != nil {
 		return err
 	}
 	return sqlTx.Commit()

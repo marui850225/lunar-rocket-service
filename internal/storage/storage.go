@@ -17,9 +17,15 @@ type Storage interface {
 	// InTx runs fn in one transaction, giving it both tables. Concurrent
 	// InTx calls cannot interleave with it. If fn returns an error, nothing
 	// it wrote is kept.
-	InTx(ctx context.Context, fn func(rockets RocketTable, pending PendingTable) error) error
+	InTx(ctx context.Context, fn func(Tables) error) error
 
 	Close() error
+}
+
+// Tables gives InTx's function both tables, bound to that transaction.
+type Tables struct {
+	Rockets RocketTable
+	Pending PendingTable
 }
 
 // RocketTable is the rockets table: one row per channel with the rocket's

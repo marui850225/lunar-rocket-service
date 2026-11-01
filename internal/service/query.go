@@ -16,9 +16,9 @@ import (
 func (s *Service) GetRocket(ctx context.Context, id string) (model.Rocket, error) {
 	var r model.Rocket
 	var found bool
-	err := s.store.InTx(ctx, func(rockets storage.RocketTable, _ storage.PendingTable) error {
+	err := s.store.InTx(ctx, func(tables storage.Tables) error {
 		var err error
-		r, found, err = rockets.Get(id)
+		r, found, err = tables.Rockets.Get(id)
 		return err
 	})
 	if err != nil {
@@ -51,9 +51,9 @@ func (s *Service) ListRockets(ctx context.Context, sortBy, order string) ([]mode
 	opts := storage.ListOptions{SortBy: field, Desc: order == "desc", LaunchedOnly: true}
 
 	var list []model.Rocket
-	err := s.store.InTx(ctx, func(rockets storage.RocketTable, _ storage.PendingTable) error {
+	err := s.store.InTx(ctx, func(tables storage.Tables) error {
 		var err error
-		list, err = rockets.List(opts)
+		list, err = tables.Rockets.List(opts)
 		return err
 	})
 	return list, err
@@ -62,9 +62,9 @@ func (s *Service) ListRockets(ctx context.Context, sortBy, order string) ([]mode
 // Debug describes every channel's progress and buffer.
 func (s *Service) Debug(ctx context.Context) ([]model.ChannelInfo, error) {
 	var infos []model.ChannelInfo
-	err := s.store.InTx(ctx, func(_ storage.RocketTable, pending storage.PendingTable) error {
+	err := s.store.InTx(ctx, func(tables storage.Tables) error {
 		var err error
-		infos, err = pending.Summary()
+		infos, err = tables.Pending.Summary()
 		return err
 	})
 	return infos, err
