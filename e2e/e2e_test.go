@@ -80,6 +80,7 @@ func runScenario(t *testing.T, sc scenario) {
 	t.Logf("      settings: %d messages, concurrency 3 (program default), injected failure rate %.0f%%",
 		sc.messages, sc.failRate*100)
 
+	t.Logf("[2/5] starting the server")
 	serverURL := startServer(t, serverBin)
 	proxy := &recorder{backend: serverURL, failRate: sc.failRate, rng: rand.New(rand.NewPCG(7, 0))}
 	front := httptest.NewServer(proxy)
@@ -140,6 +141,98 @@ func runScenario(t *testing.T, sc scenario) {
 		ref.launched, ref.channels, rocketMismatches+debugMismatches)
 }
 
+// TestOutOfOrderAndDuplicates sends a short sequence by hand, because the
+// real program almost never reorders or duplicates: messages 3 and 2 before
+// the launch, then the launch, then a resent message 2.
+func TestOutOfOrderAndDuplicates(t *testing.T) {
+	serverBin := os.Getenv("SERVER_BIN")
+	if serverBin == "" {
+		serverBin = "../bin/server"
+	}
+	t.Logf("[1/4] scenario \"out of order and duplicates\": messages sent by hand to one rocket")
+	url := startServer(t, serverBin)
+
+	post := func(n int, msgType, body string) string {
+		t.Helper()
+		msg := fmt.Sprintf(`{"metadata":{"channel":"demo","messageNumber":%d,"messageTime":"2026-11-01T10:00:0%dZ","messageType":%q},"message":%s}`,
+			n, n, msgType, body)
+		resp, err := http.Post(url+"/messages", "application/json", strings.NewReader(msg))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var res struct{ Result string }
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST message %d: %s, %v", n, resp.Status, err)
+		}
+		return res.Result
+	}
+	expect := func(what, got, want string) {
+		t.Helper()
+		status := "ok"
+		if got != want {
+			status = "WRONG"
+			t.Errorf("%s: got %s, want %s", what, got, want)
+		}
+		t.Logf("      %-55s → %-22s %s", what, got, status)
+	}
+	rocket := func() (status int, speed int64, last int) {
+		t.Helper()
+		resp, err := http.Get(url + "/rockets/demo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var r struct {
+			Speed             int64
+			LastMessageNumber int
+		}
+		json.NewDecoder(resp.Body).Decode(&r)
+		return resp.StatusCode, r.Speed, r.LastMessageNumber
+	}
+	pending := func() string {
+		t.Helper()
+		var infos []struct {
+			Channel        string
+			PendingNumbers []int
+		}
+		getJSON(t, url+"/debug/store", &infos)
+		for _, ci := range infos {
+			if ci.Channel == "demo" {
+				return fmt.Sprint(ci.PendingNumbers)
+			}
+		}
+		return "[]"
+	}
+
+	t.Logf("[2/4] messages 3 and 2 arrive before the launch (message 1)")
+	expect("POST message 3 (speed +100)", post(3, "RocketSpeedIncreased", `{"by":100}`), "buffered")
+	expect("POST message 2 (speed +50)", post(2, "RocketSpeedIncreased", `{"by":50}`), "buffered")
+	code, _, _ := rocket()
+	expect("GET /rockets/demo before launch", strconv.Itoa(code), "404")
+	expect("pending in /debug/store", pending(), "[2 3]")
+
+	t.Logf("[3/4] the launch arrives: 1, 2 and 3 are applied in one go")
+	expect("POST message 1 (launch, speed 500)", post(1, "RocketLaunched", `{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}`), "applied")
+	code, speed, last := rocket()
+	expect("GET /rockets/demo", strconv.Itoa(code), "200")
+	expect("speed (500 + 50 + 100)", strconv.FormatInt(speed, 10), "650")
+	expect("lastMessageNumber", strconv.Itoa(last), "3")
+	expect("pending in /debug/store", pending(), "[]")
+
+	t.Logf("[4/4] message 2 is delivered again")
+	expect("POST message 2 again", post(2, "RocketSpeedIncreased", `{"by":50}`), "duplicate")
+	_, speed, last = rocket()
+	expect("speed unchanged", strconv.FormatInt(speed, 10), "650")
+	expect("lastMessageNumber unchanged", strconv.Itoa(last), "3")
+
+	verdict := "PASS"
+	if t.Failed() {
+		verdict = "FAIL"
+	}
+	t.Logf("SUMMARY \"out of order and duplicates\": %s | checked: 2 early messages buffered, applied after the launch; 1 resent message ignored", verdict)
+}
+
 // --- server process -------------------------------------------------------
 
 func startServer(t *testing.T, bin string) string {
@@ -167,7 +260,7 @@ func startServer(t *testing.T, bin string) string {
 	})
 
 	url := "http://" + addr
-	t.Logf("[2/5] server: started %s on %s with a fresh database", bin, addr)
+	t.Logf("      server: started %s on %s with a fresh database", bin, addr)
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
 		if resp, err := http.Get(url + "/rockets"); err == nil {
 			resp.Body.Close()

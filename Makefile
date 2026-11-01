@@ -5,10 +5,14 @@ DB ?= rockets.db
 # The provided test program; override if yours lives elsewhere.
 ROCKETS_BIN ?= $(HOME)/Downloads/lunar-backend-engineer-challenge-ai/$(shell $(GO) env GOOS)_$(shell $(GO) env GOARCH)/rockets
 
-.PHONY: run build test e2e fmt vet lint
+.PHONY: run publish build test e2e fmt vet lint
 
 run:
 	$(GO) run ./cmd/server -addr $(ADDR) -db $(DB)
+
+# Send the provided test program's messages to the running server (make run).
+publish:
+	$(ROCKETS_BIN) launch "http://localhost$(ADDR)/messages"
 
 build:
 	$(GO) build -o bin/server ./cmd/server

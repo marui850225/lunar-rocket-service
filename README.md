@@ -22,8 +22,16 @@ make run                                         # logs: level=INFO msg=listenin
 ### 2. Send the real messages (terminal 2)
 
 ```bash
-./rockets launch "http://localhost:8088/messages"   # the provided test program, with its defaults
+make publish
 ```
+
+`make publish` runs the provided test program with its defaults against the server from step 1. On Linux x86-64 that is exactly:
+
+```bash
+~/Downloads/lunar-backend-engineer-challenge-ai/linux_amd64/rockets launch "http://localhost:8088/messages"
+```
+
+The program comes with the challenge, not with this repository. `make publish` and `make e2e` look for it at `~/Downloads/lunar-backend-engineer-challenge-ai/<os>_<arch>/rockets`, where `<os>_<arch>` is your platform's folder in the challenge download (`linux_amd64`, `linux_arm64`, `darwin_arm64`, `darwin_amd64`, `windows_amd64`, …). If it is elsewhere: `make publish ROCKETS_BIN=/path/to/rockets`.
 
 This is how the graders run it: 100,000 messages in about a minute. The program spreads them over **20 rockets** (always the same 20 with its default seed), so 20 rockets is the expected result, 6 of which explode. The commands below also work while it is still sending.
 
@@ -66,7 +74,7 @@ Without `make`: `go run ./cmd/server`.
 | Ordering property test | `internal/service` | 100 seeded random orderings of a 100-message stream, each message delivered 1 to 3 times, all reach the same state as a naive in-order fold |
 | Concurrency test | `internal/service` | 16 writers and 2 readers over 8 rockets under `-race`; final state still matches |
 | HTTP tests | `internal/api` | Status codes, JSON shape, 404s, sorting defaults and validation |
-| End to end | `e2e/` | **Defaults:** 100,000 messages in about a minute; all 20 rockets match field by field. **Injected failures:** 10% of requests fail (half dropped, half with the reply lost), producing about 1,000 real duplicates and many gaps; state and buffers still match |
+| End to end | `e2e/` | **Defaults:** 100,000 messages in about a minute; all 20 rockets match field by field. **Out of order and duplicates:** messages 3 and 2 before the launch are buffered (404, pending `[2 3]`), applied when message 1 arrives (speed 650), and a resent message 2 is ignored. **Injected failures:** 10% of requests fail (half dropped, half with the reply lost), producing about 1,000 real duplicates and many gaps; state and buffers still match |
 
 The tests were also checked to fail when the code is broken on purpose: skipping the duplicate check, applying buffered messages across a gap, or not deleting applied messages from `pending` each make the service tests fail, and removing deduplication makes the e2e failure scenario fail. The server was also killed with `kill -9` mid-run and restarted on the same database; the whole test program was then replayed from message 1 (about 34,000 duplicates followed by new messages). The final state matched an uninterrupted run exactly: 20 rockets, 6 exploded, 0 differences, nothing left pending. See `AI_WORKFLOW.md`.
 
