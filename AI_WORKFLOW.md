@@ -141,3 +141,9 @@ Step R4 — docs:
 
 - The e2e test now reports five numbered steps per scenario: the scenario and its settings; the server it started; what the publisher sent (requests, injected failures split into dropped vs reply lost, forwarded, the server's applied/buffered/duplicate counts); what the reference expects (unique messages, channels, launched/exploded, pending, and how many published messages never reached the server); and the comparison (rockets, channels and fields compared, mismatches). One SUMMARY line per scenario.
 - One run of the failure scenario failed during publishing and could not be explained: the test only printed the path of the rockets log, which lives in a temp dir deleted after the test. Six reruns passed. AI did not hide it: the test now prints the last 20 lines of the rockets log on that failure (verified with a fake rockets that exits with an error), so a recurrence will show its cause. Root cause still unknown.
+
+### 17. README demo section (human request)
+
+- AI added a "Demo" section: start the server, run the real program, read and sort rockets, send out-of-order and duplicate messages by hand, error answers, restart survival. Explained why 20 rockets is correct (the program's default seed always uses 20 channels) and why `pending` is empty after a run (rows are deleted as soon as they are applied).
+- AI verified every demo command by extracting it from the README and running it; found and fixed one bug (`grep -A5` cut off the pending numbers).
+- AI mistake: its own check server failed to start because the human's `make run` already held port 8088, and AI did not check before sending; the demo traffic (one `rockets` run and two test rockets) went into the human's database. Reported immediately with a clean-up command. Lesson: start check servers on a free port and confirm they are up.
