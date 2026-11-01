@@ -15,9 +15,16 @@ Requires **Go 1.25+**. Use two terminals, both in the project folder; `python3` 
 ### 1. Start the server (terminal 1)
 
 ```bash
-rm -f rockets.db rockets.db-wal rockets.db-shm   # optional: start from an empty database
-make run                                         # logs: level=INFO msg=listening addr=[::]:8088 db=rockets.db
+make run          # logs: level=INFO msg=listening addr=[::]:8088 db=rockets.db
 ```
+
+To start from an empty database, stop the server (Ctrl-C) and delete all three files before `make run`:
+
+```bash
+rm -f rockets.db rockets.db-wal rockets.db-shm
+```
+
+SQLite runs in WAL mode, so recent data lives in `rockets.db-wal` next to `rockets.db`; always delete or copy them together. If a database viewer (IntelliJ, GoLand, DB Browser) has the file open, disconnect it first: on Linux and macOS it otherwise keeps showing the deleted file's old data.
 
 ### 2. Send the real messages (terminal 2)
 
@@ -48,7 +55,7 @@ Without `make`: `go run ./cmd/server`.
 | Flag | Default | Meaning |
 |---|---|---|
 | `-addr` | `:8088` | HTTP listen address |
-| `-db` | `rockets.db` | SQLite file, created if missing. Delete it to start from scratch |
+| `-db` | `rockets.db` | SQLite file, created if missing (with `-wal` and `-shm` files next to it) |
 
 ## Testing
 
