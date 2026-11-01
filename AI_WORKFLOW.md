@@ -1,14 +1,74 @@
-# AI Workflow Log
+# AI Workflow
 
-How AI (Claude Code) was used on this challenge: what was delegated, what was verified by hand, and where AI output was overridden. Entries are added as work happens, newest last.
+How I built this service with an AI coding agent (Claude Code): what I delegated, what I verified myself, where I overrode the AI, and how quality was kept. The structured part is first; the full step-by-step log, written as the work happened, is at the end.
 
-## Split of ownership
+## The workflow
 
-- **Human:** design decisions; writes or reviews line by line `internal/rocket` and `internal/store`.
-- **AI:** investigation, scaffolding, HTTP layer, scripts, docs drafts, adversarial tests.
-- **Rule:** no AI-written code is committed unread.
+1. **Understand before coding.** The AI read the challenge and interviewed me about the design, one question at a time, each with a recommendation; I made every decision. In parallel it ran the provided `rockets` program against a logging stub and analysed 100,000 real messages, so the design rests on measured behaviour, not on the README alone.
+2. **Write the design down.** A design document (architecture, ordering, concurrency, persistence, API, limitations) before any code.
+3. **Build in small, tested steps.** One layer per step, each a commit with its tests passing (29 commits). The AI drafted code and tests; I decided what each step should do and approved moving on.
+4. **Verify beyond "tests pass".** Mutation checks (break the code on purpose, the tests must fail), the real program end to end, fault injection, a crash-and-replay test, and benchmarks on the real disk.
+5. **Review.** An automated code review, then fixes with a test each. A linter (staticcheck, all checks).
+6. **Redesign and simplify when the design is not right.** I replaced the in-memory store with SQLite and a service layer, then cut the code to a minimal version I can explain line by line. Removed features are documented with how to add them back.
+7. **Understand every line.** I walked through the code file by file. When an answer did not convince me, the code changed.
+8. **Keep a log as I go.** Every step below was written when it happened, including the AI's mistakes.
 
-## Log
+## Who did what
+
+| | Me | The AI |
+|---|---|---|
+| Problem understanding | Decided how to handle out-of-order messages, duplicates, status codes, edge cases | Read the README, ran and measured the real program, proposed options with trade-offs |
+| Design | Every decision; the SQLite redesign; the layers; naming | Design document, sketches, measurements (e.g. durability cost) |
+| Code | Reviewed through questions and the line-by-line walkthrough; directed refactors | Wrote the code and the tests |
+| Verification | Ran the demo myself; judged whether tests prove the right thing | Wrote and ran tests, mutation checks, e2e, crash test, review, lint |
+| Documentation | Decided what goes in | Drafted README, design doc, this log |
+
+## Where I overrode or redirected the AI
+
+| AI's version | My decision |
+|---|---|
+| Compare bodies of duplicate messages while buffered | Simpler: the first copy wins, bodies are never compared |
+| In-memory store with per-rocket locks | Relational SQLite store: a `rockets` table and a `pending` buffer table |
+| Watermark column called `applied` | `last_message_number`, the publisher's own term; rocket model column stays `type` |
+| Domain package with types and rules together | `model` holds types only; rules live in a `service` layer that I asked for |
+| Storage interface `Tx` mixing two tables, reads on `Storage` | One interface per table; `Storage` only runs transactions; the `Tables` struct kept by my preference |
+| Debug data type in the storage package | Moved to `model` |
+| Many hardening features (graceful shutdown, buffer cap, flags, read pool, …) | Removed for a minimal, explainable version; documented as a backlog |
+| README run command `./rockets launch …` | I found it does not work; replaced with `make publish` |
+
+It also went the other way:
+
+- My first SQLite sketch stored only message numbers in the buffer table. The AI pointed out that the body is needed to apply a message later, and that draining must loop over the whole contiguous run. I accepted both and decided the loop stays in Go, not SQL.
+- I proposed keeping applied rows in the `pending` table (with an `applied` flag) for debugging. The AI showed it would be a partial, misleading history (in-order messages never enter that table), and I dropped the idea.
+
+## How quality was kept
+
+- **Decisions before code:** the design interview and the design document.
+- **Small steps:** every commit builds and passes its tests.
+- **Tests at every layer:** message rules, SQLite storage, the service, HTTP handlers.
+- **Tests that hunt bugs:** a property test (100 random orderings with duplicates) against a deliberately naive oracle; a concurrency test under the race detector.
+- **Real conditions:** e2e with the real `rockets` binary and the real server, including 10% injected failures (about 1,000 real duplicates per run) and a by-hand out-of-order and duplicate scenario.
+- **Tests that can fail:** mutation checks for dedup, ordering and locking; each broken version made the tests fail.
+- **Crash safety:** `kill -9` mid-run, restart, replay the whole stream: 0 differences from an uninterrupted run.
+- **Review and lint:** an automated code review (10 findings, all fixed with tests) and staticcheck with all checks (0 issues).
+
+## AI mistakes that were caught
+
+| Mistake | How it was caught |
+|---|---|
+| Logged "listening" before the port was bound, so a port conflict looked like success | Seen while demoing; fixed |
+| First e2e test never produced a real duplicate | AI noticed 0 duplicates in its own results; added "reply lost" failures |
+| A benchmark on `/tmp` (a RAM disk) hid a 100× durability cost | Re-measured on the real disk before wiring it in |
+| A README claim about mutation tests outlived the code it described | Re-ran the checks on the new code before keeping the claim |
+| 10 issues, including a possible permanent freeze after a panic | Code review |
+| Launched a maximum-effort review on top of a running one, using up my session limit | Logged; lesson: ask before expensive operations |
+| One unexplained e2e failure | Could not reproduce in 6 runs; the test now prints diagnostics |
+| Its check server failed to start and its test traffic went into my database | Reported immediately with a clean-up command; lesson: confirm a server is up before using it |
+| Old header of this file claimed "no AI code committed unread" | Not accurate: I read the code line by line after implementation; corrected here |
+
+## Step-by-step log
+
+Written as the work happened, oldest first. "Human" is me.
 
 ### 1. Design grilling (AI-led interview, human decisions)
 
