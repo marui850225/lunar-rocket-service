@@ -107,3 +107,10 @@ Step R4 — docs:
 
 - Human asked for another round of testing. AI ran it on a fresh clone from GitHub, as a grader would: `gofmt`, `go vet` (incl. e2e), `make test`, `make e2e` all pass (defaults: 20 rockets match field by field; injected failures: 1,064 duplicates, all rockets and buffers match).
 - New crash-and-replay test: server killed with `kill -9` 20 s into a run, restarted on the same database (20 rockets, ~33,900 messages processed), then the whole test program replayed from message 1. Final state compared with a separate uninterrupted run: 0 differences in type, speed, mission, status, reason and lastMessageNumber; 6/6 exploded; nothing pending; no errors or panics in any server log.
+
+### 12. Test cleanup (human request: remove unnecessary tests)
+
+- AI reviewed all six test files and removed only cases already proven elsewhere, then checked with a coverage diff that nothing lost coverage (api 89.1%, service 87.7%, sqlite 84.2% before and after; 0 code blocks covered before and not after).
+- Removed: `TestLaunched` (covered by the apply table), `TestDecodeRealSample` (e2e decodes 100,000 real messages), sqlite `TestEmptyList` and `TestChannels` (the API tests run the same paths against real SQLite), two of three 400 cases in the API status-code table (validation is tested in `decode`; one case proves the 400 mapping), four per-field sort cases in the API list test (every field and direction is tested at the SQLite layer).
+- Folded the two overflow cases into the apply table instead of an awkward `append`.
+- Random-order property test: 200 → 100 seeds. `make test` went from ~100 s to 53 s.

@@ -42,7 +42,7 @@ Without `make`: `go run ./cmd/server`. Flags:
 
 | Command | What it runs | Time |
 |---|---|---|
-| `make test` | All unit tests under the race detector, against real SQLite files | about 1 to 2 min |
+| `make test` | All unit tests under the race detector, against real SQLite files | about 1 min |
 | `go test -short ./...` | The same with fewer random seeds | about 10 s |
 | `make e2e` | The real `rockets` binary against the real server binary, checked against an independent reference | about 1 min |
 
@@ -52,7 +52,7 @@ Without `make`: `go run ./cmd/server`. Flags:
 |---|---|---|
 | Rule tests | `internal/service` | Each message type and each edge-case rule; decoding and validation of every field |
 | Storage tests | `internal/storage/sqlite` | Round trip including NULLs and time zones, buffer dedup and order, rollback on error, every sort field and direction, data survives reopening, SQLite settings really applied |
-| Ordering property test | `internal/service` | 200 seeded random orderings of a 100-message stream, each message delivered 1 to 3 times, all reach the same state as a naive in-order fold |
+| Ordering property test | `internal/service` | 100 seeded random orderings of a 100-message stream, each message delivered 1 to 3 times, all reach the same state as a naive in-order fold |
 | Concurrency test | `internal/service` | 16 writers and 2 readers over 8 rockets under `-race`; final state still matches |
 | HTTP tests | `internal/api` | Every status code, JSON shape, 404s, every sort field and order |
 | End to end | `e2e/` | **Defaults:** 100,000 messages in about a minute; all 20 rockets match field by field. **Injected failures:** 10% of requests fail (half dropped, half with the reply lost), producing about 1,000 real duplicates and many gaps; state and buffers still match |

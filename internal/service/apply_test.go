@@ -81,28 +81,14 @@ func TestApply(t *testing.T) {
 			want:     model.Rocket{ID: "ch-1", UpdatedAt: t0.Add(2 * time.Second), LastMessageNumber: 2},
 			wantErr:  errLaunchNotFirst,
 		},
-	}
-
-	// Overflow is skipped like any other invalid-in-this-state message.
-	tests = append(tests,
-		struct {
-			name     string
-			messages []model.Message
-			want     model.Rocket
-			wantErr  error
-		}{
+		{
 			name:     "speed increase that would overflow is skipped",
 			messages: []model.Message{launchN(1), msg(2, model.SpeedIncreased{By: math.MaxInt64})},
 			want: model.Rocket{ID: "ch-1", Type: "Falcon-9", Speed: 500, Mission: "ARTEMIS", Status: model.StatusActive,
 				LaunchedAt: t0.Add(1 * time.Second), UpdatedAt: t0.Add(2 * time.Second), LastMessageNumber: 2},
 			wantErr: errSpeedOverflow,
 		},
-		struct {
-			name     string
-			messages []model.Message
-			want     model.Rocket
-			wantErr  error
-		}{
+		{
 			name: "speed decrease that would overflow is skipped",
 			messages: []model.Message{launchN(1), msg(2, model.SpeedDecreased{By: math.MaxInt64}),
 				msg(3, model.SpeedDecreased{By: math.MaxInt64})},
@@ -110,7 +96,7 @@ func TestApply(t *testing.T) {
 				LaunchedAt: t0.Add(1 * time.Second), UpdatedAt: t0.Add(3 * time.Second), LastMessageNumber: 3},
 			wantErr: errSpeedOverflow,
 		},
-	)
+	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -126,16 +112,5 @@ func TestApply(t *testing.T) {
 				t.Fatalf("state =\n  %+v\nwant\n  %+v", r, tt.want)
 			}
 		})
-	}
-}
-
-func TestLaunched(t *testing.T) {
-	var r model.Rocket
-	if r.Launched() {
-		t.Fatal("zero rocket reports launched")
-	}
-	r, _ = apply(r, launchN(1))
-	if !r.Launched() {
-		t.Fatal("rocket not launched after RocketLaunched")
 	}
 }

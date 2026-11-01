@@ -226,48 +226,6 @@ func TestListRockets(t *testing.T) {
 	}
 }
 
-func TestEmptyList(t *testing.T) {
-	db, _ := open(t)
-	got, err := db.ListRockets(ctx, storage.ListOptions{SortBy: storage.SortID})
-	if err != nil || got == nil || len(got) != 0 {
-		t.Fatalf("got %#v, %v; want empty non-nil slice", got, err)
-	}
-}
-
-func TestChannels(t *testing.T) {
-	db, _ := open(t)
-	inChannel(t, db, "b", func(tx storage.Tx) error {
-		return tx.SaveRocket(model.Rocket{ID: "b", Status: model.StatusActive, LastMessageNumber: 2})
-	})
-	inChannel(t, db, "b", func(tx storage.Tx) error {
-		_, err := tx.AddPending(model.Message{Channel: "b", Number: 4, Time: time.Now(), Payload: model.Exploded{}})
-		return err
-	})
-	inChannel(t, db, "a", func(tx storage.Tx) error { // buffered only, no rocket row
-		_, err := tx.AddPending(model.Message{Channel: "a", Number: 3, Time: time.Now(), Payload: model.Exploded{}})
-		return err
-	})
-
-	got, err := db.Channels(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []storage.ChannelInfo{
-		{Channel: "a", Launched: false, LastMessageNumber: 0, PendingCount: 1, PendingNumbers: []int{3}},
-		{Channel: "b", Launched: true, LastMessageNumber: 2, PendingCount: 1, PendingNumbers: []int{4}},
-	}
-	if len(got) != 2 {
-		t.Fatalf("got %+v", got)
-	}
-	for i := range want {
-		g, w := got[i], want[i]
-		if g.Channel != w.Channel || g.Launched != w.Launched || g.LastMessageNumber != w.LastMessageNumber ||
-			g.PendingCount != w.PendingCount || len(g.PendingNumbers) != 1 || g.PendingNumbers[0] != w.PendingNumbers[0] {
-			t.Errorf("channel %d = %+v, want %+v", i, g, w)
-		}
-	}
-}
-
 func TestSurvivesReopen(t *testing.T) {
 	db, path := open(t)
 	inChannel(t, db, "a", func(tx storage.Tx) error {

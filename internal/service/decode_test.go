@@ -79,15 +79,3 @@ func TestDecodeInvalid(t *testing.T) {
 		})
 	}
 }
-
-func TestDecodeRealSample(t *testing.T) {
-	// Captured verbatim from the rockets binary (seed 444).
-	in := `{"metadata":{"channel":"af465720-41b1-559a-adeb-4b86eb5df254","messageNumber":1,"messageType":"RocketLaunched","messageTime":"2026-10-29T09:20:06.677197834+01:00"},"message":{"type":"Athena","launchSpeed":500,"mission":"APOLLO"}}`
-	m, err := decode([]byte(in))
-	if err != nil {
-		t.Fatalf("Decode: %v", err)
-	}
-	if m.Type() != model.TypeLaunched || m.Payload != (model.Launched{RocketType: "Athena", LaunchSpeed: 500, Mission: "APOLLO"}) {
-		t.Fatalf("got %+v", m)
-	}
-}

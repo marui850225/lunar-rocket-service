@@ -237,7 +237,7 @@ func BenchmarkIngestInOrder(b *testing.B) {
 }
 
 func TestAnyOrderGivesSameResult(t *testing.T) {
-	seeds := uint64(200)
+	seeds := uint64(100)
 	if testing.Short() {
 		seeds = 20
 	}
