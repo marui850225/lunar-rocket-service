@@ -22,16 +22,10 @@ make run                                         # logs: level=INFO msg=listenin
 ### 2. Send the real messages (terminal 2)
 
 ```bash
-make publish
+make publish     # make -n publish prints the exact command it runs
 ```
 
-`make publish` runs the provided test program with its defaults against the server from step 1. On Linux x86-64 that is exactly:
-
-```bash
-~/Downloads/lunar-backend-engineer-challenge-ai/linux_amd64/rockets launch "http://localhost:8088/messages"
-```
-
-The program comes with the challenge, not with this repository. `make publish` and `make e2e` look for it at `~/Downloads/lunar-backend-engineer-challenge-ai/<os>_<arch>/rockets`, where `<os>_<arch>` is your platform's folder in the challenge download (`linux_amd64`, `linux_arm64`, `darwin_arm64`, `darwin_amd64`, `windows_amd64`, …). If it is elsewhere: `make publish ROCKETS_BIN=/path/to/rockets`.
+This runs the challenge's `rockets` program with its defaults against the server from step 1. It expects the program at `~/Downloads/lunar-backend-engineer-challenge-ai/<os>_<arch>/rockets` (your platform's folder, e.g. `linux_amd64`); if it is elsewhere, use `make publish ROCKETS_BIN=/path/to/rockets`.
 
 This is how the graders run it: 100,000 messages in about a minute. The program spreads them over **20 rockets** (always the same 20 with its default seed), so 20 rockets is the expected result, 6 of which explode. The commands below also work while it is still sending.
 
