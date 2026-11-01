@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"rockets-service/internal/model"
-	"rockets-service/internal/storage"
 	"rockets-service/internal/storage/sqlite"
 )
 
@@ -23,14 +22,14 @@ var (
 	t0    = time.Date(2022, 2, 2, 19, 39, 5, 0, time.UTC)
 )
 
-func newService(t testing.TB) (*Service, storage.Storage) {
+func newService(t testing.TB) *Service {
 	t.Helper()
 	db, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return New(db, quiet), db
+	return New(db, quiet)
 }
 
 func mk(channel string, n int, p model.Payload) model.Message {
@@ -55,9 +54,9 @@ func mustIngest(t testing.TB, s *Service, m model.Message) Result {
 }
 
 // bookkeeping returns a channel's watermark and buffered numbers.
-func bookkeeping(t testing.TB, db storage.Storage, channel string) (last int, pending []int) {
+func bookkeeping(t testing.TB, s *Service, channel string) (last int, pending []int) {
 	t.Helper()
-	infos, err := db.Channels(ctx)
+	infos, err := s.Debug(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +70,7 @@ func bookkeeping(t testing.TB, db storage.Storage, channel string) (last int, pe
 
 func TestIngestOrderingExample(t *testing.T) {
 	// Arrivals 1, 7, 5, 4, 3, 2: message 2 applies 2..5, and 7 waits for 6.
-	s, db := newService(t)
+	s := newService(t)
 	steps := []struct {
 		msg         model.Message
 		want        Result
@@ -92,7 +91,7 @@ func TestIngestOrderingExample(t *testing.T) {
 		if got := mustIngest(t, s, st.msg); got != st.want {
 			t.Fatalf("step %d (#%d): result %v, want %v", i, st.msg.Number, got, st.want)
 		}
-		last, pending := bookkeeping(t, db, "a")
+		last, pending := bookkeeping(t, s, "a")
 		if last != st.wantLast || fmt.Sprint(pending) != st.wantPending {
 			t.Fatalf("step %d: last=%d pending=%v, want %d %s", i, last, pending, st.wantLast, st.wantPending)
 		}
@@ -104,7 +103,7 @@ func TestIngestOrderingExample(t *testing.T) {
 }
 
 func TestDuplicateOfPendingKeepsFirstCopy(t *testing.T) {
-	s, _ := newService(t)
+	s := newService(t)
 	mustIngest(t, s, up("a", 2, 100))
 	if got := mustIngest(t, s, up("a", 2, 999)); got != Duplicate {
 		t.Fatalf("result %v, want Duplicate", got)
@@ -116,7 +115,7 @@ func TestDuplicateOfPendingKeepsFirstCopy(t *testing.T) {
 }
 
 func TestHiddenUntilLaunched(t *testing.T) {
-	s, _ := newService(t)
+	s := newService(t)
 	mustIngest(t, s, up("a", 2, 100))
 	if _, err := s.GetRocket(ctx, "a"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetRocket before launch: %v, want ErrNotFound", err)
@@ -135,11 +134,11 @@ func TestHiddenUntilLaunched(t *testing.T) {
 }
 
 func TestIngestRejectsInvalid(t *testing.T) {
-	s, db := newService(t)
+	s := newService(t)
 	if _, err := s.Ingest(ctx, []byte(`{nope`)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid", err)
 	}
-	if infos, _ := db.Channels(ctx); len(infos) != 0 {
+	if infos, _ := s.Debug(ctx); len(infos) != 0 {
 		t.Fatalf("invalid message touched storage: %+v", infos)
 	}
 	res, err := s.Ingest(ctx, []byte(`{"metadata":{"channel":"a","messageNumber":1,"messageTime":"2022-02-02T19:39:05+01:00","messageType":"RocketLaunched"},"message":{"type":"Atlas","launchSpeed":5,"mission":"M"}}`))
@@ -199,7 +198,7 @@ func sameRocket(a, b model.Rocket) bool {
 }
 
 func BenchmarkIngestInOrder(b *testing.B) {
-	s, _ := newService(b)
+	s := newService(b)
 	mustIngest(b, s, launch("a"))
 	b.ResetTimer()
 	for i := range b.N {
@@ -212,7 +211,7 @@ func TestAnyOrderGivesSameResult(t *testing.T) {
 	if testing.Short() {
 		seeds = 20
 	}
-	s, _ := newService(t)
+	s := newService(t)
 	for seed := range seeds {
 		rng := rand.New(rand.NewPCG(seed, 0))
 		ch := fmt.Sprintf("seed-%d", seed) // one channel per seed, one shared database
@@ -251,7 +250,7 @@ func TestConcurrentIngest(t *testing.T) {
 	}
 	all = mess(rng, all)
 
-	s, _ := newService(t)
+	s := newService(t)
 	work := make(chan model.Message)
 	var wg sync.WaitGroup
 	for range workers {
@@ -301,7 +300,7 @@ func TestConcurrentIngest(t *testing.T) {
 // at 1001 while in-order messages keep arriving. Each in-order ingest must
 // not read the buffered messages it cannot apply.
 func BenchmarkIngestWithLargeBufferBehindGap(b *testing.B) {
-	s, _ := newService(b)
+	s := newService(b)
 	mustIngest(b, s, launch("a"))
 	for n := 1002; n <= 10001; n++ {
 		mustIngest(b, s, up("a", n, 1))

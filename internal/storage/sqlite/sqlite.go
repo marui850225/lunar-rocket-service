@@ -78,9 +78,9 @@ func Open(path string) (*DB, error) {
 
 func (db *DB) Close() error { return db.db.Close() }
 
-// InChannel runs fn in a transaction. With one connection, no other query
-// can run until it ends; the channel argument scopes what the Tx touches.
-func (db *DB) InChannel(ctx context.Context, channel string, fn func(storage.RocketTable, storage.PendingTable) error) error {
+// InTx runs fn in a transaction. With one connection, no other query can run
+// until it ends.
+func (db *DB) InTx(ctx context.Context, fn func(storage.RocketTable, storage.PendingTable) error) error {
 	sqlTx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -88,22 +88,49 @@ func (db *DB) InChannel(ctx context.Context, channel string, fn func(storage.Roc
 	// Undo everything unless Commit succeeds, also if fn returns an error or
 	// panics. After a successful Commit this does nothing.
 	defer sqlTx.Rollback()
-	in := scope{ctx: ctx, tx: sqlTx, channel: channel}
+	in := scope{ctx: ctx, tx: sqlTx}
 	if err := fn(rocketTable{in}, pendingTable{in}); err != nil {
 		return err
 	}
 	return sqlTx.Commit()
 }
 
+// scope is what both tables share: the open transaction and its context.
+type scope struct {
+	ctx context.Context
+	tx  *sql.Tx
+}
+
+// --- rockets table -------------------------------------------------------------
+
+// rocketTable implements storage.RocketTable.
+type rocketTable struct{ scope }
+
 const rocketColumns = `channel, type, speed, mission, status, explosion_reason, launched_at, updated_at, last_message_number`
 
-func (db *DB) GetRocket(ctx context.Context, channel string) (model.Rocket, bool, error) {
-	row := db.db.QueryRowContext(ctx, `SELECT `+rocketColumns+` FROM rockets WHERE channel = ?`, channel)
+func (t rocketTable) Get(channel string) (model.Rocket, bool, error) {
+	row := t.tx.QueryRowContext(t.ctx, `SELECT `+rocketColumns+` FROM rockets WHERE channel = ?`, channel)
 	r, err := scanRocket(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Rocket{}, false, nil
 	}
 	return r, err == nil, err
+}
+
+func (t rocketTable) Save(r model.Rocket) error {
+	if r.ID == "" {
+		return errors.New("saving a rocket without an ID")
+	}
+	_, err := t.tx.ExecContext(t.ctx, `
+		INSERT INTO rockets (`+rocketColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (channel) DO UPDATE SET
+			type = excluded.type, speed = excluded.speed, mission = excluded.mission,
+			status = excluded.status, explosion_reason = excluded.explosion_reason,
+			launched_at = excluded.launched_at, updated_at = excluded.updated_at,
+			last_message_number = excluded.last_message_number`,
+		r.ID, nullString(r.Type), r.Speed, nullString(r.Mission), nullString(string(r.Status)),
+		nullString(r.ExplosionReason), nullTime(r.LaunchedAt), nullTime(r.UpdatedAt), r.LastMessageNumber)
+	return err
 }
 
 // sortColumns maps each sort field to a fixed column name. User input is
@@ -118,7 +145,7 @@ var sortColumns = map[storage.SortField]string{
 	storage.SortUpdatedAt:  "updated_at",
 }
 
-func (db *DB) ListRockets(ctx context.Context, opts storage.ListOptions) ([]model.Rocket, error) {
+func (t rocketTable) List(opts storage.ListOptions) ([]model.Rocket, error) {
 	column, ok := sortColumns[opts.SortBy]
 	if !ok {
 		return nil, fmt.Errorf("unknown sort field %q", opts.SortBy)
@@ -133,7 +160,7 @@ func (db *DB) ListRockets(ctx context.Context, opts storage.ListOptions) ([]mode
 	}
 	query += ` ORDER BY ` + column + ` ` + dir + `, channel ASC`
 
-	rows, err := db.db.QueryContext(ctx, query)
+	rows, err := t.tx.QueryContext(t.ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -149,16 +176,59 @@ func (db *DB) ListRockets(ctx context.Context, opts storage.ListOptions) ([]mode
 	return out, rows.Err()
 }
 
-// Channels reads every channel's bookkeeping in one read transaction, so
-// counts and number lists come from the same snapshot.
-func (db *DB) Channels(ctx context.Context) ([]model.ChannelInfo, error) {
-	rtx, err := db.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return nil, err
-	}
-	defer rtx.Rollback()
+// --- pending table -------------------------------------------------------------
 
-	rows, err := rtx.QueryContext(ctx, `
+// pendingTable implements storage.PendingTable.
+type pendingTable struct{ scope }
+
+func (t pendingTable) Add(m model.Message) (bool, error) {
+	body, err := encodePayload(m.Payload)
+	if err != nil {
+		return false, err
+	}
+	res, err := t.tx.ExecContext(t.ctx, `
+		INSERT INTO pending (channel, message_number, message_type, message_time, body)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (channel, message_number) DO NOTHING`,
+		m.Channel, m.Number, string(m.Type()), formatTime(m.Time), body)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+func (t pendingTable) Get(channel string, number int) (model.Message, bool, error) {
+	var typ, msgTime, body string
+	err := t.tx.QueryRowContext(t.ctx, `
+		SELECT message_type, message_time, body FROM pending
+		WHERE channel = ? AND message_number = ?`, channel, number).Scan(&typ, &msgTime, &body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Message{}, false, nil
+	}
+	if err != nil {
+		return model.Message{}, false, err
+	}
+	m := model.Message{Channel: channel, Number: number}
+	if m.Time, err = parseTime(msgTime); err != nil {
+		return model.Message{}, false, err
+	}
+	if m.Payload, err = decodePayload(model.MessageType(typ), body); err != nil {
+		return model.Message{}, false, err
+	}
+	return m, true, nil
+}
+
+func (t pendingTable) Delete(channel string, from, to int) error {
+	_, err := t.tx.ExecContext(t.ctx,
+		`DELETE FROM pending WHERE channel = ? AND message_number BETWEEN ? AND ?`, channel, from, to)
+	return err
+}
+
+// Summary reads every channel's progress and buffer. It also reads the
+// rockets table, for each channel's last_message_number.
+func (t pendingTable) Summary() ([]model.ChannelInfo, error) {
+	rows, err := t.tx.QueryContext(t.ctx, `
 		SELECT c.channel,
 		       r.status IS NOT NULL,
 		       COALESCE(r.last_message_number, 0),
@@ -185,7 +255,7 @@ func (db *DB) Channels(ctx context.Context) ([]model.ChannelInfo, error) {
 		return nil, err
 	}
 
-	nums, err := rtx.QueryContext(ctx, `
+	nums, err := t.tx.QueryContext(t.ctx, `
 		SELECT channel, message_number FROM (
 			SELECT channel, message_number,
 			       ROW_NUMBER() OVER (PARTITION BY channel ORDER BY message_number) AS rn
@@ -206,87 +276,6 @@ func (db *DB) Channels(ctx context.Context) ([]model.ChannelInfo, error) {
 		}
 	}
 	return out, nums.Err()
-}
-
-// --- tables inside a transaction ---------------------------------------------
-
-// scope is what both tables share: the open transaction and the channel.
-type scope struct {
-	ctx     context.Context
-	tx      *sql.Tx
-	channel string
-}
-
-// rocketTable implements storage.RocketTable.
-type rocketTable struct{ scope }
-
-// pendingTable implements storage.PendingTable.
-type pendingTable struct{ scope }
-
-func (t rocketTable) Get() (model.Rocket, error) {
-	row := t.tx.QueryRowContext(t.ctx, `SELECT `+rocketColumns+` FROM rockets WHERE channel = ?`, t.channel)
-	r, err := scanRocket(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return model.Rocket{}, nil
-	}
-	return r, err
-}
-
-func (t rocketTable) Save(r model.Rocket) error {
-	_, err := t.tx.ExecContext(t.ctx, `
-		INSERT INTO rockets (`+rocketColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (channel) DO UPDATE SET
-			type = excluded.type, speed = excluded.speed, mission = excluded.mission,
-			status = excluded.status, explosion_reason = excluded.explosion_reason,
-			launched_at = excluded.launched_at, updated_at = excluded.updated_at,
-			last_message_number = excluded.last_message_number`,
-		t.channel, nullString(r.Type), r.Speed, nullString(r.Mission), nullString(string(r.Status)),
-		nullString(r.ExplosionReason), nullTime(r.LaunchedAt), nullTime(r.UpdatedAt), r.LastMessageNumber)
-	return err
-}
-
-func (t pendingTable) Add(m model.Message) (bool, error) {
-	body, err := encodePayload(m.Payload)
-	if err != nil {
-		return false, err
-	}
-	res, err := t.tx.ExecContext(t.ctx, `
-		INSERT INTO pending (channel, message_number, message_type, message_time, body)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT (channel, message_number) DO NOTHING`,
-		t.channel, m.Number, string(m.Type()), formatTime(m.Time), body)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n == 1, err
-}
-
-func (t pendingTable) Get(number int) (model.Message, bool, error) {
-	var typ, msgTime, body string
-	err := t.tx.QueryRowContext(t.ctx, `
-		SELECT message_type, message_time, body FROM pending
-		WHERE channel = ? AND message_number = ?`, t.channel, number).Scan(&typ, &msgTime, &body)
-	if errors.Is(err, sql.ErrNoRows) {
-		return model.Message{}, false, nil
-	}
-	if err != nil {
-		return model.Message{}, false, err
-	}
-	m := model.Message{Channel: t.channel, Number: number}
-	if m.Time, err = parseTime(msgTime); err != nil {
-		return model.Message{}, false, err
-	}
-	if m.Payload, err = decodePayload(model.MessageType(typ), body); err != nil {
-		return model.Message{}, false, err
-	}
-	return m, true, nil
-}
-
-func (t pendingTable) Delete(from, to int) error {
-	_, err := t.tx.ExecContext(t.ctx,
-		`DELETE FROM pending WHERE channel = ? AND message_number BETWEEN ? AND ?`, t.channel, from, to)
-	return err
 }
 
 // --- row mapping -------------------------------------------------------------

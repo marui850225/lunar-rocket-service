@@ -37,8 +37,10 @@ func (s *Service) Ingest(ctx context.Context, body []byte) (Result, error) {
 // applies 2,3,4,5 and leaves 7 waiting for 6.
 func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 	var res Result
-	err := s.store.InChannel(ctx, m.Channel, func(rockets storage.RocketTable, pending storage.PendingTable) error {
-		r, err := rockets.Get()
+	err := s.store.InTx(ctx, func(rockets storage.RocketTable, pending storage.PendingTable) error {
+		// A channel seen for the first time has no row yet: r is then the
+		// zero Rocket, with LastMessageNumber 0.
+		r, _, err := rockets.Get(m.Channel)
 		if err != nil {
 			return err
 		}
@@ -66,7 +68,7 @@ func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 		r = s.applyAndLog(r, m)
 		last := m.Number
 		for {
-			next, found, err := pending.Get(last + 1)
+			next, found, err := pending.Get(m.Channel, last+1)
 			if err != nil {
 				return err
 			}
@@ -80,7 +82,7 @@ func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 			return err
 		}
 		if last > m.Number {
-			if err := pending.Delete(m.Number+1, last); err != nil {
+			if err := pending.Delete(m.Channel, m.Number+1, last); err != nil {
 				return err
 			}
 		}

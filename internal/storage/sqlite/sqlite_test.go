@@ -25,11 +25,41 @@ func open(t *testing.T) (*DB, string) {
 	return db, path
 }
 
-func inChannel(t *testing.T, db *DB, ch string, fn func(storage.RocketTable, storage.PendingTable) error) {
+func inTx(t *testing.T, db *DB, fn func(storage.RocketTable, storage.PendingTable) error) {
 	t.Helper()
-	if err := db.InChannel(ctx, ch, fn); err != nil {
+	if err := db.InTx(ctx, fn); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Read helpers: each runs one read in its own transaction.
+
+func getRocket(t *testing.T, db *DB, channel string) (r model.Rocket, found bool) {
+	t.Helper()
+	inTx(t, db, func(rockets storage.RocketTable, _ storage.PendingTable) error {
+		var err error
+		r, found, err = rockets.Get(channel)
+		return err
+	})
+	return r, found
+}
+
+func list(db *DB, opts storage.ListOptions) (out []model.Rocket, err error) {
+	err = db.InTx(ctx, func(rockets storage.RocketTable, _ storage.PendingTable) error {
+		out, err = rockets.List(opts)
+		return err
+	})
+	return out, err
+}
+
+func summary(t *testing.T, db *DB) (out []model.ChannelInfo) {
+	t.Helper()
+	inTx(t, db, func(_ storage.RocketTable, pending storage.PendingTable) error {
+		var err error
+		out, err = pending.Summary()
+		return err
+	})
+	return out
 }
 
 var plusOne = time.FixedZone("+01:00", 3600)
@@ -54,25 +84,18 @@ func sameRocket(a, b model.Rocket) bool {
 func TestRocketRoundTrip(t *testing.T) {
 	db, _ := open(t)
 	want := sampleRocket("a")
-	inChannel(t, db, "a", func(rockets storage.RocketTable, pending storage.PendingTable) error { return rockets.Save(want) })
+	inTx(t, db, func(rockets storage.RocketTable, pending storage.PendingTable) error { return rockets.Save(want) })
 
-	got, found, err := db.GetRocket(ctx, "a")
-	if err != nil || !found || !sameRocket(got, want) {
-		t.Fatalf("GetRocket = %+v, %v, %v; want %+v", got, found, err, want)
+	got, found := getRocket(t, db, "a")
+	if !found || !sameRocket(got, want) {
+		t.Fatalf("Get = %+v, %v; want %+v", got, found, want)
 	}
-	inChannel(t, db, "a", func(rockets storage.RocketTable, pending storage.PendingTable) error {
-		got, err := rockets.Get()
-		if !sameRocket(got, want) {
-			t.Errorf("Rocket.Get = %+v, %v", got, err)
-		}
-		return err
-	})
 
 	// Overwrite with fewer fields: empty strings and zero times become NULL and come back empty.
-	inChannel(t, db, "a", func(rockets storage.RocketTable, pending storage.PendingTable) error {
+	inTx(t, db, func(rockets storage.RocketTable, pending storage.PendingTable) error {
 		return rockets.Save(model.Rocket{ID: "a", LastMessageNumber: 3})
 	})
-	got, _, _ = db.GetRocket(ctx, "a")
+	got, _ = getRocket(t, db, "a")
 	if got.Type != "" || got.Status != "" || !got.LaunchedAt.IsZero() || got.LastMessageNumber != 3 {
 		t.Fatalf("after overwrite: %+v", got)
 	}
@@ -80,16 +103,15 @@ func TestRocketRoundTrip(t *testing.T) {
 
 func TestMissingRocket(t *testing.T) {
 	db, _ := open(t)
-	if _, found, err := db.GetRocket(ctx, "nope"); found || err != nil {
-		t.Fatalf("found=%v err=%v", found, err)
+	if r, found := getRocket(t, db, "nope"); found || r != (model.Rocket{}) {
+		t.Fatalf("Get(nope) = %+v, found=%v; want zero, false", r, found)
 	}
-	inChannel(t, db, "nope", func(rockets storage.RocketTable, pending storage.PendingTable) error {
-		r, err := rockets.Get()
-		if r != (model.Rocket{}) {
-			t.Errorf("Rocket.Get = %+v, want zero", r)
-		}
-		return err
+	err := db.InTx(ctx, func(rockets storage.RocketTable, _ storage.PendingTable) error {
+		return rockets.Save(model.Rocket{Speed: 1})
 	})
+	if err == nil {
+		t.Fatal("saved a rocket without an ID")
+	}
 }
 
 func msg(n int, p model.Payload) model.Message {
@@ -105,41 +127,41 @@ func TestPending(t *testing.T) {
 		msg(3, model.SpeedDecreased{By: 7}),
 		msg(1, model.SpeedIncreased{By: 6}),
 	}
-	inChannel(t, db, "a", func(rockets storage.RocketTable, pending storage.PendingTable) error {
+	inTx(t, db, func(rockets storage.RocketTable, pending storage.PendingTable) error {
 		for _, m := range in {
 			if added, err := pending.Add(m); !added || err != nil {
-				t.Fatalf("AddPending #%d: %v %v", m.Number, added, err)
+				t.Fatalf("Add #%d: %v %v", m.Number, added, err)
 			}
 		}
 		if added, err := pending.Add(msg(3, model.SpeedDecreased{By: 999})); added || err != nil {
-			t.Fatalf("duplicate AddPending: added=%v err=%v", added, err)
+			t.Fatalf("duplicate Add: added=%v err=%v", added, err)
 		}
 		return nil
 	})
 
-	inChannel(t, db, "a", func(rockets storage.RocketTable, pending storage.PendingTable) error {
+	inTx(t, db, func(rockets storage.RocketTable, pending storage.PendingTable) error {
 		for _, src := range in {
-			g, found, err := pending.Get(src.Number)
+			g, found, err := pending.Get("a", src.Number)
 			if err != nil || !found {
-				t.Fatalf("Pending(%d): found=%v err=%v", src.Number, found, err)
+				t.Fatalf("Get(%d): found=%v err=%v", src.Number, found, err)
 			}
 			if g.Number != src.Number || g.Channel != "a" || g.Type() != src.Type() || g.Payload != src.Payload || !g.Time.Equal(src.Time) {
-				t.Errorf("Pending(%d) = %+v, want %+v", src.Number, g, src)
+				t.Errorf("Get(%d) = %+v, want %+v", src.Number, g, src)
 			}
 		}
-		if g, _, _ := pending.Get(3); g.Payload.(model.SpeedDecreased).By != 7 {
+		if g, _, _ := pending.Get("a", 3); g.Payload.(model.SpeedDecreased).By != 7 {
 			t.Errorf("duplicate overwrote first copy: %+v", g.Payload)
 		}
-		if _, found, err := pending.Get(99); found || err != nil {
-			t.Errorf("Pending(99): found=%v err=%v", found, err)
+		if _, found, err := pending.Get("a", 99); found || err != nil {
+			t.Errorf("Get(99): found=%v err=%v", found, err)
 		}
 
-		if err := pending.Delete(2, 4); err != nil {
+		if err := pending.Delete("a", 2, 4); err != nil {
 			return err
 		}
 		for k, want := range map[int]bool{1: true, 2: false, 3: false, 4: false, 5: true} {
-			if _, found, _ := pending.Get(k); found != want {
-				t.Errorf("after DeletePending(2, 4): Pending(%d) found=%v, want %v", k, found, want)
+			if _, found, _ := pending.Get("a", k); found != want {
+				t.Errorf("after Delete(2, 4): Get(%d) found=%v, want %v", k, found, want)
 			}
 		}
 		return nil
@@ -149,7 +171,7 @@ func TestPending(t *testing.T) {
 func TestRollbackOnError(t *testing.T) {
 	db, _ := open(t)
 	boom := errors.New("boom")
-	err := db.InChannel(ctx, "a", func(rockets storage.RocketTable, pending storage.PendingTable) error {
+	err := db.InTx(ctx, func(rockets storage.RocketTable, pending storage.PendingTable) error {
 		rockets.Save(sampleRocket("a"))
 		pending.Add(msg(9, model.SpeedIncreased{By: 1}))
 		return boom
@@ -157,10 +179,10 @@ func TestRollbackOnError(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v", err)
 	}
-	if _, found, _ := db.GetRocket(ctx, "a"); found {
+	if _, found := getRocket(t, db, "a"); found {
 		t.Fatal("rocket saved despite rollback")
 	}
-	if chs, _ := db.Channels(ctx); len(chs) != 0 {
+	if chs := summary(t, db); len(chs) != 0 {
 		t.Fatalf("channels after rollback: %+v", chs)
 	}
 }
@@ -180,7 +202,7 @@ func TestListRockets(t *testing.T) {
 		{ID: "z-unlaunched", LastMessageNumber: 1},
 	}
 	for _, r := range rockets {
-		inChannel(t, db, r.ID, func(rockets storage.RocketTable, pending storage.PendingTable) error { return rockets.Save(r) })
+		inTx(t, db, func(rockets storage.RocketTable, pending storage.PendingTable) error { return rockets.Save(r) })
 	}
 
 	tests := []struct {
@@ -199,7 +221,7 @@ func TestListRockets(t *testing.T) {
 		{storage.ListOptions{SortBy: storage.SortID}, "a,b,c,z-unlaunched"},
 	}
 	for _, tt := range tests {
-		got, err := db.ListRockets(ctx, tt.opts)
+		got, err := list(db, tt.opts)
 		if err != nil {
 			t.Fatalf("%+v: %v", tt.opts, err)
 		}
@@ -212,7 +234,7 @@ func TestListRockets(t *testing.T) {
 		}
 	}
 
-	if _, err := db.ListRockets(ctx, storage.ListOptions{SortBy: "speed; DROP TABLE rockets"}); err == nil {
+	if _, err := list(db, storage.ListOptions{SortBy: "speed; DROP TABLE rockets"}); err == nil {
 		t.Fatal("unknown sort field accepted")
 	}
 	for _, f := range storage.SortFields {
@@ -224,7 +246,7 @@ func TestListRockets(t *testing.T) {
 
 func TestSurvivesReopen(t *testing.T) {
 	db, path := open(t)
-	inChannel(t, db, "a", func(rockets storage.RocketTable, pending storage.PendingTable) error {
+	inTx(t, db, func(rockets storage.RocketTable, pending storage.PendingTable) error {
 		if err := rockets.Save(sampleRocket("a")); err != nil {
 			return err
 		}
@@ -238,10 +260,10 @@ func TestSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db2.Close()
-	if got, found, _ := db2.GetRocket(ctx, "a"); !found || !sameRocket(got, sampleRocket("a")) {
+	if got, found := getRocket(t, db2, "a"); !found || !sameRocket(got, sampleRocket("a")) {
 		t.Fatalf("after reopen: %+v %v", got, found)
 	}
-	if chs, _ := db2.Channels(ctx); len(chs) != 1 || chs[0].PendingCount != 1 {
+	if chs := summary(t, db2); len(chs) != 1 || chs[0].PendingCount != 1 {
 		t.Fatalf("pending after reopen: %+v", chs)
 	}
 }
@@ -266,12 +288,12 @@ func TestPanicInTransactionRollsBackAndReleasesWriter(t *testing.T) {
 				t.Fatal("panic was swallowed")
 			}
 		}()
-		db.InChannel(ctx, "a", func(rockets storage.RocketTable, pending storage.PendingTable) error {
+		db.InTx(ctx, func(rockets storage.RocketTable, pending storage.PendingTable) error {
 			rockets.Save(sampleRocket("a"))
 			panic("boom")
 		})
 	}()
-	if _, found, _ := db.GetRocket(ctx, "a"); found {
+	if _, found := getRocket(t, db, "a"); found {
 		t.Fatal("write from the panicking transaction was kept")
 	}
 
@@ -279,7 +301,7 @@ func TestPanicInTransactionRollsBackAndReleasesWriter(t *testing.T) {
 	// blocked forever; the timeout turns a hang into a failure.
 	done := make(chan error, 1)
 	go func() {
-		done <- db.InChannel(ctx, "b", func(rockets storage.RocketTable, pending storage.PendingTable) error {
+		done <- db.InTx(ctx, func(rockets storage.RocketTable, pending storage.PendingTable) error {
 			return rockets.Save(sampleRocket("b"))
 		})
 	}()

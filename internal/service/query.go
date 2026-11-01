@@ -14,7 +14,13 @@ import (
 // launched yet are ErrNotFound: without RocketLaunched there is no type,
 // mission or speed to show.
 func (s *Service) GetRocket(ctx context.Context, id string) (model.Rocket, error) {
-	r, found, err := s.store.GetRocket(ctx, id)
+	var r model.Rocket
+	var found bool
+	err := s.store.InTx(ctx, func(rockets storage.RocketTable, _ storage.PendingTable) error {
+		var err error
+		r, found, err = rockets.Get(id)
+		return err
+	})
 	if err != nil {
 		return model.Rocket{}, err
 	}
@@ -42,10 +48,24 @@ func (s *Service) ListRockets(ctx context.Context, sortBy, order string) ([]mode
 	if order != "asc" && order != "desc" {
 		return nil, fmt.Errorf("%w: unknown order %q (want asc or desc)", ErrInvalidSort, order)
 	}
-	return s.store.ListRockets(ctx, storage.ListOptions{SortBy: field, Desc: order == "desc", LaunchedOnly: true})
+	opts := storage.ListOptions{SortBy: field, Desc: order == "desc", LaunchedOnly: true}
+
+	var list []model.Rocket
+	err := s.store.InTx(ctx, func(rockets storage.RocketTable, _ storage.PendingTable) error {
+		var err error
+		list, err = rockets.List(opts)
+		return err
+	})
+	return list, err
 }
 
-// Debug describes every channel's watermark and buffer.
+// Debug describes every channel's progress and buffer.
 func (s *Service) Debug(ctx context.Context) ([]model.ChannelInfo, error) {
-	return s.store.Channels(ctx)
+	var infos []model.ChannelInfo
+	err := s.store.InTx(ctx, func(_ storage.RocketTable, pending storage.PendingTable) error {
+		var err error
+		infos, err = pending.Summary()
+		return err
+	})
+	return infos, err
 }
