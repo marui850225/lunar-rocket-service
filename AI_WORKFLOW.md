@@ -135,3 +135,4 @@ Step R4 — docs:
 
 - AI reviewed every comment in source and tests: removed stale terms from older versions ("watermark", "snapshots", "single writer connection", "before the fix"), an inaccurate claim ("model contains no behaviour" though it has `Type()`/`Launched()`), and shortened wordy ones (`ingest`, `Open`, the drain loop).
 - Lint: downloading staticcheck was blocked by the permission system (external code), so AI ran `go vet`, `gofmt -s` and scripted checks of common staticcheck/golint rules. Fixed: doc comments for the five exported payload types; two error strings started with a capital letter (ST1005). Left as is, with reason: test `t.Errorf` messages (not error strings), interface method implementations (documented on the interface), `Close`.
+- Human installed staticcheck; AI ran it: 0 issues with the default checks and with `-checks all`, including the e2e package. Added `make lint`.

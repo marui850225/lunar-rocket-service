@@ -42,6 +42,7 @@ Without `make`: `go run ./cmd/server`. Flags:
 | `make test` | All unit tests under the race detector, against real SQLite files | about 1 min |
 | `go test -short ./...` | The same with fewer random seeds | about 10 s |
 | `make e2e` | The real `rockets` binary against the real server binary, checked against an independent reference | about 1 min |
+| `make lint` | `go vet` and staticcheck with all checks enabled (needs `staticcheck` installed) | seconds |
 
 `make e2e` looks for the test program at `~/Downloads/lunar-backend-engineer-challenge-ai/<os>_<arch>/rockets`. Point it elsewhere with `make e2e ROCKETS_BIN=/path/to/rockets`.
 

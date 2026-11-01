@@ -5,7 +5,7 @@ DB ?= rockets.db
 # The provided test program; override if yours lives elsewhere.
 ROCKETS_BIN ?= $(HOME)/Downloads/lunar-backend-engineer-challenge-ai/$(shell $(GO) env GOOS)_$(shell $(GO) env GOARCH)/rockets
 
-.PHONY: run build test e2e fmt vet
+.PHONY: run build test e2e fmt vet lint
 
 run:
 	$(GO) run ./cmd/server -addr $(ADDR) -db $(DB)
@@ -26,3 +26,8 @@ fmt:
 
 vet:
 	$(GO) vet ./...
+
+# Needs staticcheck: go install honnef.co/go/tools/cmd/staticcheck@latest
+lint: vet
+	staticcheck -checks all ./...
+	staticcheck -checks all -tags e2e ./e2e
