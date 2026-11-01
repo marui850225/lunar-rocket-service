@@ -11,10 +11,10 @@ import (
 
 // Storage is the persistent store of rockets and their buffered messages.
 type Storage interface {
-	// InChannel runs fn in one transaction that no other InChannel call for
-	// the same channel can interleave with. If fn returns an error, nothing
-	// it wrote is kept.
-	InChannel(ctx context.Context, channel string, fn func(Tx) error) error
+	// InChannel runs fn in one transaction, giving it this channel's rows in
+	// both tables. No other InChannel call for the same channel can
+	// interleave with it. If fn returns an error, nothing it wrote is kept.
+	InChannel(ctx context.Context, channel string, fn func(Tables) error) error
 
 	// GetRocket returns a rocket's state; found is false if the channel has
 	// no saved state.
@@ -30,19 +30,31 @@ type Storage interface {
 	Close() error
 }
 
-// Tx operates on one channel inside an InChannel transaction.
-type Tx interface {
-	// Rocket returns the channel's state, or a zero Rocket if none is saved.
-	Rocket() (model.Rocket, error)
-	SaveRocket(model.Rocket) error
+// Tables gives InChannel's function one channel's rows in each table. Every
+// call runs inside that InChannel transaction.
+type Tables struct {
+	Rocket  RocketTable
+	Pending PendingTable
+}
 
-	// AddPending buffers a message. added is false if a message with the
-	// same number is already buffered.
-	AddPending(model.Message) (added bool, err error)
-	// Pending returns the buffered message with this number, if any.
-	Pending(number int) (m model.Message, found bool, err error)
-	// DeletePending removes buffered messages numbered from..to, inclusive.
-	DeletePending(from, to int) error
+// RocketTable is the channel's row in the rockets table: its current state.
+type RocketTable interface {
+	// Get returns the rocket, or a zero Rocket if none is saved yet.
+	Get() (model.Rocket, error)
+	// Save inserts or updates the rocket.
+	Save(model.Rocket) error
+}
+
+// PendingTable is the channel's rows in the pending table: messages that
+// arrived before the ones they follow.
+type PendingTable interface {
+	// Add buffers a message. added is false if one with the same number is
+	// already buffered.
+	Add(model.Message) (added bool, err error)
+	// Get returns the buffered message with this number, if any.
+	Get(number int) (m model.Message, found bool, err error)
+	// Delete removes buffered messages numbered from..to, inclusive.
+	Delete(from, to int) error
 }
 
 // SortField names a rocket field to order a list by.

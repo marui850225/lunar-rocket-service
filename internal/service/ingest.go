@@ -37,8 +37,8 @@ func (s *Service) Ingest(ctx context.Context, body []byte) (Result, error) {
 // applies 2,3,4,5 and leaves 7 waiting for 6.
 func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 	var res Result
-	err := s.store.InChannel(ctx, m.Channel, func(tx storage.Tx) error {
-		r, err := tx.Rocket()
+	err := s.store.InChannel(ctx, m.Channel, func(tables storage.Tables) error {
+		r, err := tables.Rocket.Get()
 		if err != nil {
 			return err
 		}
@@ -48,7 +48,7 @@ func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 		}
 
 		if m.Number > r.LastMessageNumber+1 {
-			added, err := tx.AddPending(m)
+			added, err := tables.Pending.Add(m)
 			if err != nil {
 				return err
 			}
@@ -66,7 +66,7 @@ func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 		r = s.applyAndLog(r, m)
 		last := m.Number
 		for {
-			next, found, err := tx.Pending(last + 1)
+			next, found, err := tables.Pending.Get(last + 1)
 			if err != nil {
 				return err
 			}
@@ -76,11 +76,11 @@ func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 			r = s.applyAndLog(r, next)
 			last = next.Number
 		}
-		if err := tx.SaveRocket(r); err != nil {
+		if err := tables.Rocket.Save(r); err != nil {
 			return err
 		}
 		if last > m.Number {
-			if err := tx.DeletePending(m.Number+1, last); err != nil {
+			if err := tables.Pending.Delete(m.Number+1, last); err != nil {
 				return err
 			}
 		}

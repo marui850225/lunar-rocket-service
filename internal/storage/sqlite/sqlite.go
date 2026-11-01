@@ -80,7 +80,7 @@ func (db *DB) Close() error { return db.db.Close() }
 
 // InChannel runs fn in a transaction. With one connection, no other query
 // can run until it ends; the channel argument scopes what the Tx touches.
-func (db *DB) InChannel(ctx context.Context, channel string, fn func(storage.Tx) error) error {
+func (db *DB) InChannel(ctx context.Context, channel string, fn func(storage.Tables) error) error {
 	sqlTx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -88,7 +88,8 @@ func (db *DB) InChannel(ctx context.Context, channel string, fn func(storage.Tx)
 	// Undo everything unless Commit succeeds, also if fn returns an error or
 	// panics. After a successful Commit this does nothing.
 	defer sqlTx.Rollback()
-	if err := fn(&tx{ctx: ctx, tx: sqlTx, channel: channel}); err != nil {
+	in := scope{ctx: ctx, tx: sqlTx, channel: channel}
+	if err := fn(storage.Tables{Rocket: rocketTable{in}, Pending: pendingTable{in}}); err != nil {
 		return err
 	}
 	return sqlTx.Commit()
@@ -207,15 +208,22 @@ func (db *DB) Channels(ctx context.Context) ([]storage.ChannelInfo, error) {
 	return out, nums.Err()
 }
 
-// --- transaction -----------------------------------------------------------
+// --- tables inside a transaction ---------------------------------------------
 
-type tx struct {
+// scope is what both tables share: the open transaction and the channel.
+type scope struct {
 	ctx     context.Context
 	tx      *sql.Tx
 	channel string
 }
 
-func (t *tx) Rocket() (model.Rocket, error) {
+// rocketTable implements storage.RocketTable.
+type rocketTable struct{ scope }
+
+// pendingTable implements storage.PendingTable.
+type pendingTable struct{ scope }
+
+func (t rocketTable) Get() (model.Rocket, error) {
 	row := t.tx.QueryRowContext(t.ctx, `SELECT `+rocketColumns+` FROM rockets WHERE channel = ?`, t.channel)
 	r, err := scanRocket(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -224,7 +232,7 @@ func (t *tx) Rocket() (model.Rocket, error) {
 	return r, err
 }
 
-func (t *tx) SaveRocket(r model.Rocket) error {
+func (t rocketTable) Save(r model.Rocket) error {
 	_, err := t.tx.ExecContext(t.ctx, `
 		INSERT INTO rockets (`+rocketColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (channel) DO UPDATE SET
@@ -237,7 +245,7 @@ func (t *tx) SaveRocket(r model.Rocket) error {
 	return err
 }
 
-func (t *tx) AddPending(m model.Message) (bool, error) {
+func (t pendingTable) Add(m model.Message) (bool, error) {
 	body, err := encodePayload(m.Payload)
 	if err != nil {
 		return false, err
@@ -254,7 +262,7 @@ func (t *tx) AddPending(m model.Message) (bool, error) {
 	return n == 1, err
 }
 
-func (t *tx) Pending(number int) (model.Message, bool, error) {
+func (t pendingTable) Get(number int) (model.Message, bool, error) {
 	var typ, msgTime, body string
 	err := t.tx.QueryRowContext(t.ctx, `
 		SELECT message_type, message_time, body FROM pending
@@ -275,7 +283,7 @@ func (t *tx) Pending(number int) (model.Message, bool, error) {
 	return m, true, nil
 }
 
-func (t *tx) DeletePending(from, to int) error {
+func (t pendingTable) Delete(from, to int) error {
 	_, err := t.tx.ExecContext(t.ctx,
 		`DELETE FROM pending WHERE channel = ? AND message_number BETWEEN ? AND ?`, t.channel, from, to)
 	return err

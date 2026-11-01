@@ -122,3 +122,8 @@ Step R4 — docs:
 - Features removed by human choice: `-sync` (hard-coded NORMAL), `-log-level` (with the debug and negative-speed logs), `-max-pending` and the buffer cap with its 503, the separate read-only pool (one SQLite connection for everything), the int64 overflow check. Kept by human choice: `/debug/store`, the lifecycle rules.
 - Each removal is listed in the README's Limitations table with what it would take to add back.
 - Verified: `go vet`, `make test` (race) and `make e2e` (defaults: all 20 rockets match; injected failures: 1,062 duplicates, all match) pass.
+
+### 14. Clearer storage interface (human request)
+
+- While walking through the code, the human pointed out that the `Tx` interface was confusing: named after a database transaction, but holding data operations on two different tables (no Commit/Rollback in it). AI agreed and offered three options; human chose one interface per table.
+- `Tx` replaced by `Tables{Rocket RocketTable; Pending PendingTable}`: `RocketTable` has `Get`/`Save`, `PendingTable` has `Add`/`Get`/`Delete`. `InChannel` stays the transaction. The service now reads `tables.Pending.Add(m)`, `tables.Rocket.Save(r)`. Pure rename and regroup; `make test` passes.
