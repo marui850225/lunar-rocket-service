@@ -38,7 +38,7 @@ type wireExploded struct {
 }
 
 // decode parses and validates one message. Any failure wraps ErrInvalid.
-// Unknown JSON fields are ignored so senders can add fields without breaking us.
+// Unknown JSON fields are ignored, so new publisher fields don't break decoding.
 func decode(data []byte) (model.Message, error) {
 	var env envelope
 	if err := json.Unmarshal(data, &env); err != nil {

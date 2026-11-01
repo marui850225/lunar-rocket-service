@@ -56,12 +56,11 @@ type DB struct {
 
 var _ storage.Storage = (*DB)(nil)
 
-// Open opens (creating if needed) the database file at path.
+// Open opens the database file at path, creating it if needed.
 //
-// WAL with synchronous=NORMAL: a commit survives a crash of this process;
-// an OS crash or power loss can lose the last few commits but never
-// corrupts the database. Fsyncing every commit (FULL) was measured at about
-// 100x slower.
+// WAL with synchronous=NORMAL: a commit survives a crash of this process; an
+// OS crash or power loss can lose the last few commits but never corrupts the
+// database. synchronous=FULL was measured about 100x slower.
 func Open(path string) (*DB, error) {
 	dsn := "file:" + url.PathEscape(path) + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)

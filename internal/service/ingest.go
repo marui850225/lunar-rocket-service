@@ -28,13 +28,12 @@ func (s *Service) Ingest(ctx context.Context, body []byte) (Result, error) {
 	return s.ingest(ctx, m)
 }
 
-// ingest processes one validated message in a single storage transaction.
+// ingest processes one validated message in a single transaction.
 //
-// Per channel, LastMessageNumber is a watermark: every message up to it has
-// been processed. Messages above watermark+1 wait in the pending buffer.
-// When the next message arrives it is applied together with the contiguous
-// run that follows it in the buffer, e.g. with 3,4,5,7 buffered, message 2
-// applies 2,3,4,5 and leaves 7 waiting for 6.
+// LastMessageNumber says how far a channel is processed. A message further
+// ahead waits in the pending table; the next one is applied together with the
+// buffered run behind it: with 3,4,5,7 buffered, message 2 applies 2..5 and 7
+// waits for 6.
 func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 	var res Result
 	err := s.store.InTx(ctx, func(tables storage.Tables) error {
@@ -62,9 +61,8 @@ func (s *Service) ingest(ctx context.Context, m model.Message) (Result, error) {
 			return nil
 		}
 
-		// m is the next message: apply it, then each buffered successor in
-		// turn, stopping at the first missing number. Only the messages that
-		// are applied are read from storage, however many wait behind a gap.
+		// m is the next message: apply it, then its buffered successors up to
+		// the first missing number.
 		r = s.applyAndLog(r, m)
 		last := m.Number
 		for {

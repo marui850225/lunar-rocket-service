@@ -53,7 +53,7 @@ func mustIngest(t testing.TB, s *Service, m model.Message) Result {
 	return res
 }
 
-// bookkeeping returns a channel's watermark and buffered numbers.
+// bookkeeping returns a channel's last message number and buffered numbers.
 func bookkeeping(t testing.TB, s *Service, channel string) (last int, pending []int) {
 	t.Helper()
 	infos, err := s.Debug(ctx)

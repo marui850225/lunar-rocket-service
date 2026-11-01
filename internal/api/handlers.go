@@ -29,8 +29,8 @@ func New(svc *service.Service, log *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /messages", h.postMessage)
 	mux.HandleFunc("GET /rockets", h.listRockets)
 	mux.HandleFunc("GET /rockets/{channel}", h.getRocket)
-	// Read-only view of internal bookkeeping (watermark, pending buffer) for
-	// debugging and demos. Would sit behind auth or an admin port in production.
+	// Read-only view of each channel's progress and buffer, for debugging.
+	// Would need auth or an admin port in production.
 	mux.HandleFunc("GET /debug/store", h.debug)
 	return mux
 }

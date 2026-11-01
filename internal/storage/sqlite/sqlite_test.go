@@ -297,8 +297,7 @@ func TestPanicInTransactionRollsBackAndReleasesWriter(t *testing.T) {
 		t.Fatal("write from the panicking transaction was kept")
 	}
 
-	// The single writer connection must be free again. Before the fix this
-	// blocked forever; the timeout turns a hang into a failure.
+	// The connection must be free again; the timeout turns a hang into a failure.
 	done := make(chan error, 1)
 	go func() {
 		done <- db.InTx(ctx, func(tables storage.Tables) error {

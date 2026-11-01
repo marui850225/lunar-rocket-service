@@ -10,8 +10,8 @@ import (
 // later messages are not blocked behind it.
 var (
 	errNotLaunched     = errors.New("message before RocketLaunched")
-	errAlreadyLaunched = errors.New("RocketLaunched for a rocket that already launched")
-	errLaunchNotFirst  = errors.New("RocketLaunched is not message 1")
+	errAlreadyLaunched = errors.New("rocket already launched")
+	errLaunchNotFirst  = errors.New("launch message is not message number 1")
 	errAfterExplosion  = errors.New("message after RocketExploded")
 )
 

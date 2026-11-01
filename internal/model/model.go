@@ -1,6 +1,6 @@
 // Package model holds the data types shared by every layer: the messages a
-// rocket sends and a rocket's state. It contains no behaviour; the rules for
-// decoding and applying messages live in the service package.
+// rocket sends and a rocket's state. The rules for decoding and applying
+// messages live in the service package.
 package model
 
 import "time"
@@ -39,24 +39,29 @@ type Payload interface{ Type() MessageType }
 // The JSON tags are the publisher's field names. They are also the format in
 // which buffered messages are stored.
 
+// Launched is the body of a RocketLaunched message.
 type Launched struct {
 	RocketType  string `json:"type"`
 	LaunchSpeed int64  `json:"launchSpeed"`
 	Mission     string `json:"mission"`
 }
 
+// SpeedIncreased is the body of a RocketSpeedIncreased message.
 type SpeedIncreased struct {
 	By int64 `json:"by"`
 }
 
+// SpeedDecreased is the body of a RocketSpeedDecreased message.
 type SpeedDecreased struct {
 	By int64 `json:"by"`
 }
 
+// MissionChanged is the body of a RocketMissionChanged message.
 type MissionChanged struct {
 	NewMission string `json:"newMission"`
 }
 
+// Exploded is the body of a RocketExploded message.
 type Exploded struct {
 	Reason string `json:"reason"`
 }
@@ -75,8 +80,7 @@ const (
 	StatusExploded Status = "EXPLODED"
 )
 
-// Rocket is the current state of one rocket. It is a plain value, so copies
-// are independent snapshots.
+// Rocket is the current state of one rocket.
 type Rocket struct {
 	ID              string
 	Type            string
