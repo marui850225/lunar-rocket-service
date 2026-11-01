@@ -8,48 +8,21 @@ A Go service that ingests rocket messages on `POST /messages` and serves each ro
 
 How AI was used to build this is logged step by step in [`AI_WORKFLOW.md`](AI_WORKFLOW.md).
 
-## Quick start
+## Run and demo
 
-Requires **Go 1.25+**.
-
-```bash
-make run                     # listens on :8088, stores state in ./rockets.db
-```
-
-In another terminal, run the provided test program with its defaults:
-
-```bash
-./rockets launch "http://localhost:8088/messages"
-```
-
-Then look at the rockets:
-
-```bash
-curl -s 'localhost:8088/rockets?sort=speed&order=desc'
-```
-
-Without `make`: `go run ./cmd/server`. Flags:
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `-addr` | `:8088` | HTTP listen address |
-| `-db` | `rockets.db` | SQLite file, created if missing. Delete it to start from scratch |
-
-## Demo
-
-A walkthrough with two terminals, both in the project folder. It needs only the server and `curl`; `python3` is used to pretty-print JSON.
+Requires **Go 1.25+**. Use two terminals, both in the project folder; `python3` is only used to pretty-print JSON.
 
 ### 1. Start the server (terminal 1)
 
 ```bash
-rm -f rockets.db rockets.db-wal rockets.db-shm   # start from an empty database
+rm -f rockets.db rockets.db-wal rockets.db-shm   # optional: start from an empty database
 make run                                         # logs: level=INFO msg=listening addr=[::]:8088 db=rockets.db
 ```
 
 ### 2. Send the real messages (terminal 2)
 
 ```bash
-~/Downloads/lunar-backend-engineer-challenge-ai/linux_amd64/rockets launch "http://localhost:8088/messages"
+./rockets launch "http://localhost:8088/messages"   # the provided test program, with its defaults
 ```
 
 This is how the graders run it: 100,000 messages in about a minute. The program spreads them over **20 rockets** (always the same 20 with its default seed), so 20 rockets is the expected result, 6 of which explode. The commands below also work while it is still sending.
@@ -66,42 +39,14 @@ curl -s localhost:8088/rockets | python3 -c 'import json,sys; r=json.load(sys.st
 # → 20 rockets, 100000 messages processed
 ```
 
-### 4. Out-of-order and duplicate messages, by hand
+### Server flags
 
-The real program almost never reorders or duplicates, so send a few messages yourself:
+Without `make`: `go run ./cmd/server`.
 
-```bash
-post() { curl -s -X POST localhost:8088/messages -d "{\"metadata\":{\"channel\":\"demo\",\"messageNumber\":$1,\"messageTime\":\"2026-11-01T10:00:0$1Z\",\"messageType\":\"$2\"},\"message\":$3}"; echo; }
-
-post 3 RocketSpeedIncreased '{"by":100}'                                       # {"result":"buffered"}
-post 2 RocketSpeedIncreased '{"by":50}'                                        # {"result":"buffered"}
-curl -s localhost:8088/rockets/demo; echo                                      # 404: not launched yet
-curl -s localhost:8088/debug/store | python3 -m json.tool | grep -A8 '"demo"'  # pendingNumbers: [2, 3]
-
-post 1 RocketLaunched '{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}'   # {"result":"applied"}: 1, 2, 3 applied
-curl -s localhost:8088/rockets/demo | python3 -m json.tool                     # speed 650 = 500 + 50 + 100
-
-post 2 RocketSpeedIncreased '{"by":50}'                                        # {"result":"duplicate"}
-curl -s localhost:8088/rockets/demo | python3 -m json.tool                     # speed still 650
-```
-
-After this, `GET /rockets` lists 21 rockets: the 20 from the program plus `demo`.
-
-### 5. Error answers
-
-```bash
-curl -s -X POST localhost:8088/messages -d '{nope'; echo                       # 400: malformed JSON
-curl -s 'localhost:8088/rockets?sort=colour'; echo                             # 400: lists the allowed fields
-curl -s localhost:8088/rockets/does-not-exist; echo                            # 404
-```
-
-### 6. Data survives a restart
-
-Stop the server with Ctrl-C in terminal 1 and run `make run` again, without deleting the database. Then:
-
-```bash
-curl -s localhost:8088/rockets/demo | python3 -m json.tool                     # still there, speed 650
-```
+| Flag | Default | Meaning |
+|---|---|---|
+| `-addr` | `:8088` | HTTP listen address |
+| `-db` | `rockets.db` | SQLite file, created if missing. Delete it to start from scratch |
 
 ## Testing
 
