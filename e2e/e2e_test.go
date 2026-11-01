@@ -28,25 +28,42 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
+type scenario struct {
+	name     string
+	goal     string
+	messages int     // passed as --max-messages when not the default
+	failRate float64 // share of requests the proxy fails
+}
+
+const defaultMessages = 100000 // the rockets program's own default
+
 func TestDefaults(t *testing.T) {
-	// Exactly how the graders run it: no flags besides the URL.
-	runScenario(t, 0, nil)
+	runScenario(t, scenario{
+		name:     "defaults",
+		goal:     "exactly how the graders run it: no flags besides the URL",
+		messages: defaultMessages,
+	})
 }
 
 func TestInjectedFailures(t *testing.T) {
-	// 10% of requests fail, so the real program redelivers them 500 ms later.
-	// Half are dropped before the server sees them (reordering, gaps); half
-	// reach the server but lose the reply (true at-least-once duplicates).
-	// The default run produces almost none of this.
-	runScenario(t, 0.10, []string{"--max-messages=20000"})
+	// Half the failures are dropped before the server sees them (gaps,
+	// reordering); half reach the server but lose the reply (true
+	// at-least-once duplicates). The default run produces almost none of this.
+	runScenario(t, scenario{
+		name:     "injected failures",
+		goal:     "10% of requests fail and are redelivered 500 ms later: real duplicates and reordering",
+		messages: 20000,
+		failRate: 0.10,
+	})
 }
 
-func runScenario(t *testing.T, failRate float64, extraFlags []string) {
+func runScenario(t *testing.T, sc scenario) {
 	rocketsBin := os.Getenv("ROCKETS_BIN")
 	if rocketsBin == "" {
 		rocketsBin = defaultRocketsBin()
@@ -59,8 +76,12 @@ func runScenario(t *testing.T, failRate float64, extraFlags []string) {
 		serverBin = "../bin/server"
 	}
 
+	t.Logf("[1/5] scenario %q: %s", sc.name, sc.goal)
+	t.Logf("      settings: %d messages, concurrency 3 (program default), injected failure rate %.0f%%",
+		sc.messages, sc.failRate*100)
+
 	serverURL := startServer(t, serverBin)
-	proxy := &recorder{backend: serverURL, failRate: failRate, rng: rand.New(rand.NewPCG(7, 0))}
+	proxy := &recorder{backend: serverURL, failRate: sc.failRate, rng: rand.New(rand.NewPCG(7, 0))}
 	front := httptest.NewServer(proxy)
 	t.Cleanup(front.Close)
 
@@ -70,20 +91,53 @@ func runScenario(t *testing.T, failRate float64, extraFlags []string) {
 		t.Fatal(err)
 	}
 	defer logFile.Close()
-	args := append([]string{"launch", front.URL + "/messages"}, extraFlags...)
+	args := []string{"launch", front.URL + "/messages"}
+	if sc.messages != defaultMessages {
+		args = append(args, fmt.Sprintf("--max-messages=%d", sc.messages))
+	}
 	cmd := exec.Command(rocketsBin, args...)
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 
+	t.Logf("[3/5] publishing: rockets %s (via the recording proxy)", strings.Join(args, " "))
 	start := time.Now()
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("rockets: %v (log: %s)", err, logPath)
+		// The log lives in t.TempDir, which is deleted after the test: show
+		// its tail now.
+		out, _ := os.ReadFile(logPath)
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		t.Fatalf("rockets exited with %v; last log lines:\n%s", err, strings.Join(lines[max(0, len(lines)-20):], "\n"))
 	}
-	t.Logf("rockets finished in %s: %d requests, %d injected failures, server results %v",
-		time.Since(start).Round(time.Millisecond), proxy.requests, proxy.injected, proxy.results)
+	t.Logf("      finished in %s", time.Since(start).Round(time.Millisecond))
+	t.Logf("      requests from rockets:   %d", proxy.requests)
+	t.Logf("      injected failures:       %d (%d dropped before the server, %d processed but reply lost)",
+		proxy.dropped+proxy.replyLost, proxy.dropped, proxy.replyLost)
+	t.Logf("      forwarded to the server: %d", proxy.forwarded)
+	t.Logf("      server replies:          applied %d, buffered %d, duplicate %d, other %d",
+		proxy.results["applied"], proxy.results["buffered"], proxy.results["duplicate"],
+		proxy.forwarded-proxy.results["applied"]-proxy.results["buffered"]-proxy.results["duplicate"])
 
-	want := reference(t, proxy.accepted)
-	checkRockets(t, serverURL, want)
-	checkDebug(t, serverURL, want)
+	want, ref := reference(t, proxy.accepted)
+	t.Logf("[4/5] reference: folded %d unique messages (%d accepted copies) over %d channels",
+		ref.unique, len(proxy.accepted), ref.channels)
+	if lost := sc.messages - ref.unique; lost > 0 {
+		t.Logf("      %d of %d published messages never reached the server: rockets drops retries still pending when it exits",
+			lost, sc.messages)
+	}
+	t.Logf("      expects %d launched rockets (%d exploded), %d messages still pending behind gaps",
+		ref.launched, ref.exploded, ref.pending)
+
+	t.Logf("[5/5] comparing the server with the reference")
+	rocketMismatches := checkRockets(t, serverURL, want)
+	debugMismatches := checkDebug(t, serverURL, want)
+
+	verdict := "PASS"
+	if t.Failed() {
+		verdict = "FAIL"
+	}
+	t.Logf("SUMMARY %q: %s | %d messages published, %d requests, %d duplicates seen by the server, "+
+		"%d rockets and %d channels compared, %d mismatches",
+		sc.name, verdict, sc.messages, proxy.requests, proxy.results["duplicate"],
+		ref.launched, ref.channels, rocketMismatches+debugMismatches)
 }
 
 // --- server process -------------------------------------------------------
@@ -113,6 +167,7 @@ func startServer(t *testing.T, bin string) string {
 	})
 
 	url := "http://" + addr
+	t.Logf("[2/5] server: started %s on %s with a fresh database", bin, addr)
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
 		if resp, err := http.Get(url + "/rockets"); err == nil {
 			resp.Body.Close()
@@ -138,12 +193,14 @@ type recorder struct {
 	backend  string
 	failRate float64
 
-	mu       sync.Mutex
-	rng      *rand.Rand
-	requests int
-	injected int
-	results  map[string]int // server's "result" field → count
-	accepted [][]byte       // bodies the server answered 200 to
+	mu        sync.Mutex
+	rng       *rand.Rand
+	requests  int            // received from rockets
+	dropped   int            // injected: never reached the server
+	replyLost int            // injected: reached the server, reply replaced by a 500
+	forwarded int            // reached the server
+	results   map[string]int // server's "result" field → count
+	accepted  [][]byte       // bodies the server answered 200 to
 }
 
 func (p *recorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -157,8 +214,14 @@ func (p *recorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.requests++
 	fail := p.rng.Float64() < p.failRate
 	loseReply := fail && p.rng.IntN(2) == 0 // else: drop the request
-	if fail {
-		p.injected++
+	switch {
+	case loseReply:
+		p.replyLost++
+	case fail:
+		p.dropped++
+	}
+	if !fail || loseReply {
+		p.forwarded++
 	}
 	p.mu.Unlock()
 	if fail && !loseReply {
@@ -228,9 +291,13 @@ type expected struct {
 	Pending               int
 }
 
+type refStats struct {
+	unique, channels, launched, exploded, pending int
+}
+
 // reference folds the accepted messages of each channel in number order,
 // stopping at the first gap. Messages after a gap must still be pending.
-func reference(t *testing.T, bodies [][]byte) map[string]expected {
+func reference(t *testing.T, bodies [][]byte) (map[string]expected, refStats) {
 	t.Helper()
 	byChannel := map[string]map[int]wireMsg{}
 	for _, b := range bodies {
@@ -282,12 +349,24 @@ func reference(t *testing.T, bodies [][]byte) map[string]expected {
 		e.Pending = len(msgs) - e.LastMessageNumber
 		out[ch] = e
 	}
-	return out
+
+	st := refStats{channels: len(out)}
+	for ch, e := range out {
+		st.unique += len(byChannel[ch])
+		st.pending += e.Pending
+		if e.Launched {
+			st.launched++
+		}
+		if e.Status == "EXPLODED" {
+			st.exploded++
+		}
+	}
+	return out, st
 }
 
 // --- checks ---------------------------------------------------------------
 
-func checkRockets(t *testing.T, url string, want map[string]expected) {
+func checkRockets(t *testing.T, url string, want map[string]expected) (mismatches int) {
 	t.Helper()
 	var got []struct {
 		ID, Type, Mission, Status string
@@ -304,6 +383,7 @@ func checkRockets(t *testing.T, url string, want map[string]expected) {
 		}
 	}
 	if len(got) != launched {
+		mismatches++
 		t.Errorf("GET /rockets returned %d rockets, reference has %d launched", len(got), launched)
 	}
 	exploded := 0
@@ -311,20 +391,24 @@ func checkRockets(t *testing.T, url string, want map[string]expected) {
 		w, ok := want[g.ID]
 		switch {
 		case !ok || !w.Launched:
+			mismatches++
 			t.Errorf("%s: listed but not launched in reference", g.ID)
 		case g.Type != w.Type || g.Speed != w.Speed || g.Mission != w.Mission || g.Status != w.Status ||
 			fmt.Sprint(deref(g.ExplosionReason)) != fmt.Sprint(deref(w.ExplosionReason)) ||
 			g.LastMessageNumber != w.LastMessageNumber:
+			mismatches++
 			t.Errorf("%s mismatch:\n got  %+v reason=%v\n want %+v reason=%v", g.ID, g, deref(g.ExplosionReason), w, deref(w.ExplosionReason))
 		}
 		if g.Status == "EXPLODED" {
 			exploded++
 		}
 	}
-	t.Logf("verified %d rockets (%d exploded) field by field", len(got), exploded)
+	t.Logf("      GET /rockets: %d rockets (%d exploded) vs %d expected; compared type, speed, mission, status, "+
+		"explosionReason, lastMessageNumber (%d fields): %d mismatches", len(got), exploded, launched, len(got)*6, mismatches)
+	return mismatches
 }
 
-func checkDebug(t *testing.T, url string, want map[string]expected) {
+func checkDebug(t *testing.T, url string, want map[string]expected) (mismatches int) {
 	t.Helper()
 	var got []struct {
 		Channel           string
@@ -333,17 +417,21 @@ func checkDebug(t *testing.T, url string, want map[string]expected) {
 	}
 	getJSON(t, url+"/debug/store", &got)
 	if len(got) != len(want) {
+		mismatches++
 		t.Errorf("debug lists %d channels, reference has %d", len(got), len(want))
 	}
 	pending := 0
 	for _, g := range got {
 		w := want[g.Channel]
 		if g.LastMessageNumber != w.LastMessageNumber || g.PendingCount != w.Pending {
+			mismatches++
 			t.Errorf("%s: lastMessageNumber=%d pending=%d, want %d/%d", g.Channel, g.LastMessageNumber, g.PendingCount, w.LastMessageNumber, w.Pending)
 		}
 		pending += g.PendingCount
 	}
-	t.Logf("verified watermark and buffer of %d channels (%d messages still pending behind gaps)", len(got), pending)
+	t.Logf("      GET /debug/store: %d channels vs %d expected; compared lastMessageNumber and pending count "+
+		"(%d still pending behind gaps): %d mismatches", len(got), len(want), pending, mismatches)
+	return mismatches
 }
 
 func getJSON(t *testing.T, url string, v any) {
