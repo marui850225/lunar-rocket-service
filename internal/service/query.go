@@ -46,6 +46,6 @@ func (s *Service) ListRockets(ctx context.Context, sortBy, order string) ([]mode
 }
 
 // Debug describes every channel's watermark and buffer.
-func (s *Service) Debug(ctx context.Context) ([]storage.ChannelInfo, error) {
+func (s *Service) Debug(ctx context.Context) ([]model.ChannelInfo, error) {
 	return s.store.Channels(ctx)
 }

@@ -14,7 +14,7 @@ type Storage interface {
 	// InChannel runs fn in one transaction, giving it this channel's rows in
 	// both tables. No other InChannel call for the same channel can
 	// interleave with it. If fn returns an error, nothing it wrote is kept.
-	InChannel(ctx context.Context, channel string, fn func(Tables) error) error
+	InChannel(ctx context.Context, channel string, fn func(rockets RocketTable, pending PendingTable) error) error
 
 	// GetRocket returns a rocket's state; found is false if the channel has
 	// no saved state.
@@ -25,19 +25,13 @@ type Storage interface {
 
 	// Channels describes every known channel, including ones that only have
 	// buffered messages. For debugging.
-	Channels(ctx context.Context) ([]ChannelInfo, error)
+	Channels(ctx context.Context) ([]model.ChannelInfo, error)
 
 	Close() error
 }
 
-// Tables gives InChannel's function one channel's rows in each table. Every
-// call runs inside that InChannel transaction.
-type Tables struct {
-	Rocket  RocketTable
-	Pending PendingTable
-}
-
-// RocketTable is the channel's row in the rockets table: its current state.
+// RocketTable is one channel's row in the rockets table: its current state.
+// It is only handed out inside an InChannel transaction.
 type RocketTable interface {
 	// Get returns the rocket, or a zero Rocket if none is saved yet.
 	Get() (model.Rocket, error)
@@ -45,8 +39,9 @@ type RocketTable interface {
 	Save(model.Rocket) error
 }
 
-// PendingTable is the channel's rows in the pending table: messages that
-// arrived before the ones they follow.
+// PendingTable is one channel's rows in the pending table: messages that
+// arrived before the ones they follow. It is only handed out inside an
+// InChannel transaction.
 type PendingTable interface {
 	// Add buffers a message. added is false if one with the same number is
 	// already buffered.
@@ -78,14 +73,4 @@ type ListOptions struct {
 	SortBy       SortField
 	Desc         bool
 	LaunchedOnly bool
-}
-
-// ChannelInfo is the bookkeeping of one channel, for debugging.
-type ChannelInfo struct {
-	Channel           string `json:"channel"`
-	Launched          bool   `json:"launched"`
-	LastMessageNumber int    `json:"lastMessageNumber"`
-	PendingCount      int    `json:"pendingCount"`
-	// PendingNumbers lists the lowest buffered message numbers, at most 100.
-	PendingNumbers []int `json:"pendingNumbers"`
 }

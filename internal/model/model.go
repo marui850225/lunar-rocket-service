@@ -91,5 +91,17 @@ type Rocket struct {
 	LastMessageNumber int
 }
 
+// ChannelInfo is the bookkeeping of one channel: how far its messages are
+// processed and which wait in the buffer. Returned as-is by GET /debug/store,
+// hence the JSON tags.
+type ChannelInfo struct {
+	Channel           string `json:"channel"`
+	Launched          bool   `json:"launched"`
+	LastMessageNumber int    `json:"lastMessageNumber"`
+	PendingCount      int    `json:"pendingCount"`
+	// PendingNumbers lists the lowest buffered message numbers, at most 100.
+	PendingNumbers []int `json:"pendingNumbers"`
+}
+
 // Launched reports whether the rocket's RocketLaunched message has been processed.
 func (r Rocket) Launched() bool { return r.Status != "" }

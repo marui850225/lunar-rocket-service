@@ -80,7 +80,7 @@ func (db *DB) Close() error { return db.db.Close() }
 
 // InChannel runs fn in a transaction. With one connection, no other query
 // can run until it ends; the channel argument scopes what the Tx touches.
-func (db *DB) InChannel(ctx context.Context, channel string, fn func(storage.Tables) error) error {
+func (db *DB) InChannel(ctx context.Context, channel string, fn func(storage.RocketTable, storage.PendingTable) error) error {
 	sqlTx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -89,7 +89,7 @@ func (db *DB) InChannel(ctx context.Context, channel string, fn func(storage.Tab
 	// panics. After a successful Commit this does nothing.
 	defer sqlTx.Rollback()
 	in := scope{ctx: ctx, tx: sqlTx, channel: channel}
-	if err := fn(storage.Tables{Rocket: rocketTable{in}, Pending: pendingTable{in}}); err != nil {
+	if err := fn(rocketTable{in}, pendingTable{in}); err != nil {
 		return err
 	}
 	return sqlTx.Commit()
@@ -151,7 +151,7 @@ func (db *DB) ListRockets(ctx context.Context, opts storage.ListOptions) ([]mode
 
 // Channels reads every channel's bookkeeping in one read transaction, so
 // counts and number lists come from the same snapshot.
-func (db *DB) Channels(ctx context.Context) ([]storage.ChannelInfo, error) {
+func (db *DB) Channels(ctx context.Context) ([]model.ChannelInfo, error) {
 	rtx, err := db.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
@@ -169,10 +169,10 @@ func (db *DB) Channels(ctx context.Context) ([]storage.ChannelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := []storage.ChannelInfo{}
+	out := []model.ChannelInfo{}
 	index := map[string]int{}
 	for rows.Next() {
-		ci := storage.ChannelInfo{PendingNumbers: []int{}}
+		ci := model.ChannelInfo{PendingNumbers: []int{}}
 		if err := rows.Scan(&ci.Channel, &ci.Launched, &ci.LastMessageNumber, &ci.PendingCount); err != nil {
 			rows.Close()
 			return nil, err

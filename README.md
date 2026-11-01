@@ -102,9 +102,9 @@ A read-only view of the bookkeeping: per channel, `lastMessageNumber`, the numbe
 cmd/server                 wiring: flags, open the database, start the HTTP server
 internal/api               HTTP only: read request → call service → status code and JSON
 internal/service           business logic: decode and validate, apply rules, ordering/buffer, get, list
-internal/storage           storage interface (no SQL, no rules) + ListOptions, SortField, ChannelInfo
+internal/storage           storage interface (no SQL, no rules) + ListOptions, SortField
 internal/storage/sqlite    SQLite implementation: schema, queries, transactions
-internal/model             shared types only: Message and payloads, Rocket, Status
+internal/model             shared types only: Message and payloads, Rocket, Status, ChannelInfo
 e2e                        end-to-end test with the real rockets binary
 ```
 
